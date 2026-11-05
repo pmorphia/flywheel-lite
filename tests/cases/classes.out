@@ -1,0 +1,14 @@
+Polly (2 legs) says tweet
+Rex (4 legs) says woof
+Generic (4 legs) says ...
+true false Dog(name="Rex", legs=4) true
+<1,2> <4,6> <-1,-2> true true true true false
+origin true 2
+7 [5, 2] [1, 2, 3] [1, 3, 6]
+100 temp
+tick 3
+tick 2
+tick 1
+42
+b Node(name="a", next=Node(name="b", next=null))
+built

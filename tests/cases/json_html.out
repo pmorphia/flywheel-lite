@@ -1,0 +1,15 @@
+Ann 0 ["a", "b"] Oslo null
+{"name":"Ann","age":0,"tags":["a","b"],"home":{"city":"Oslo","zip":null}}
+[1,2.5,true,null,{"k":"v"}] array 5 1 v
+{
+  "b": [
+    1,
+    2
+  ],
+  "a": [
+    3
+  ]
+}
+<main><div class="card" style=""><h2>Hello</h2><ul><li>one</li><li>two &amp; three</li></ul></div><input disabled="" value="x"><p>visible</p></main>
+one 2 h2
+<ul><li>one</li><li class="x">two</li></ul><p>Fish &amp; chips</p> 2 two

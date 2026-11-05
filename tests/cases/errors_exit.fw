@@ -1,0 +1,9 @@
+function risky(int n) returns int
+    if n > 2 then
+        throw ValueError("too big: {n}")
+    end
+    return n
+end
+print risky(1)
+print risky(5)
+print "not reached"

@@ -1,0 +1,99 @@
+enum Color
+    Red, Green
+    Blue
+end
+print Color.Green, Color.Green.value, Color.values(), Color.from_name("Blue"), Color.from_name("nope")
+
+enum Shape
+    Circle(double radius)
+    Rect(double w, double h)
+    Empty
+end
+
+function area(Shape s) returns double
+    match s
+        case Shape.Circle(r) then
+            return 3.0 * r * r
+        case Shape.Rect(w, h) if w == h then
+            return w * w
+        case Shape.Rect(w, h) then
+            return w * h
+        case Shape.Empty then
+            return 0.0
+    end
+end
+Shape[] shapes = [Shape.Circle(1.0), Shape.Rect(2.0, 3.0), Shape.Rect(2.0, 2.0), Shape.Empty]
+for s in shapes do
+    print s, area(s)
+end
+print Shape.Circle(2.0) == Shape.Circle(2.0), Shape.Circle(1.0) == Shape.Circle(2.0)
+
+function classify(int n) returns string
+    match n
+        case 0 then
+            return "zero"
+        case 1, 2, 3 then
+            return "small"
+        case 4..9 then
+            return "medium"
+        case 10..<100 then
+            return "large"
+        else
+            return "huge"
+    end
+end
+for n in [0, 2, 7, 42, 100] do
+    print n, classify(n)
+end
+
+function color_name(Color c) returns string
+    match c
+        case Red then
+            return "warm"
+        case Green, Blue then
+            return "cool"
+    end
+end
+print color_name(Color.Red), color_name(Color.Blue)
+
+function divide(int a, int b) returns Result<int, string>
+    if b == 0 then
+        return Result.error("division by zero")
+    end
+    return Result.ok(a // b)
+end
+for r in [divide(7, 2), divide(1, 0)] do
+    match r
+        case ok v then
+            print "ok", v
+        case error e then
+            print "error", e
+    end
+end
+print divide(9, 3), divide(9, 3).unwrap(), divide(1, 0).is_ok
+
+function describe([int, string] pair) returns string
+    match pair
+        case [0, label] then
+            return "zero " + label
+        case [n, _] if n < 0 then
+            return "negative"
+        case [n, label] then
+            return "{label}={n}"
+    end
+end
+print describe([0, "a"]), describe([-1, "b"]), describe([5, "c"])
+
+var (low, high) = [3, 9]
+var [first, _, third] = ["x", "y", "z"]
+print low, high, first, third
+
+int? maybe = null
+print maybe ?? 7
+maybe = 5
+match maybe
+    case null then
+        print "none"
+    case int v then
+        print "some", v
+end

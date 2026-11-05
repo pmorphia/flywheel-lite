@@ -1,0 +1,39 @@
+import json
+import html.*
+
+class Address
+    string city
+    string? zip = null
+end
+class Person
+    string name
+    int age = 0
+    string[] tags = []
+    Address home
+end
+
+var text = "{{\"name\": \"Ann\", \"tags\": [\"a\", \"b\"], \"home\": {{\"city\": \"Oslo\"}}}}"
+Person p = json.decode(text)
+print p.name, p.age, p.tags, p.home.city, p.home.zip
+print json.encode(p)
+var v = json.parse("[1, 2.5, true, null, {{\"k\": \"v\"}}]")
+print v, json.kind(v), json.length(v), json.as_int(v[0]), json.as_string(v[4]["k"])
+print json.encode({"b": [1, 2], "a": [3]}, 2)
+
+component Card = <div class="card" style={attr style}>
+    <h2>{attr title}</h2>
+    {attr inner}
+</div>
+
+var items = ["one", "two & three"]
+var page = <main>
+    <Card title="Hello">
+        <ul>{items.map(function(string s) => <li>{s}</li>)}</ul>
+    </Card>
+    <input disabled={true} value="x">
+    <p hidden={false}>visible</p>
+</main>
+print page
+print page.query("li").text_content, page.query_all("li").length, page.query(".card h2").tag
+var doc = html.parse("<ul><li>one<li class=x>two</ul><p>Fish &amp; chips")
+print doc, html.query_all(doc, "li").length, html.query(doc, "li.x").text_content

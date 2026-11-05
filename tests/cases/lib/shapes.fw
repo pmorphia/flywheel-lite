@@ -1,0 +1,33 @@
+# A helper module for modules.fw.
+interface Shape
+    function area() returns double
+    function name() returns string
+end
+
+class Rect implements Shape
+    double width
+    double height
+    function area() returns double
+        return inst width * inst height
+    end
+    function name() returns string
+        return "rect"
+    end
+end
+
+private function secret() returns int
+    return 42
+end
+
+int created = 0
+
+function make(double w, double h) returns Rect
+    created += 1
+    return Rect(w, h)
+end
+
+function reveal() returns int
+    return secret()
+end
+
+print "shapes module initialized"

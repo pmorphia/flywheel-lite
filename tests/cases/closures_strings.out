@@ -1,0 +1,15 @@
+3 1
+[0, 10, 20]
+10
+["fig", "pear", "kiwi", "banana"] ["fig", "kiwi"] 17
+true false
+[Héllo, Wörld!] 13 HÉLLO, WÖRLD! héllo, wörld!
+["a", "b", "", "c"] ["one", "two", "three"] x+y+z
+2 3 2 e ell llo
+cba ababab 007 7.. 2
+a, b 1-2-3 ["line1", "line2", "line3"]
+1,234.50|    42|25.6%|0xff|**ok**|00007|3.14
+{literal} { spaced } c false 65 B
+3 0.3 1e+21 -0.5 2.5e-07 2.5 3 1 -3
+43 5 true [0, 0, 0]
+int double string int[] map<string,int> null

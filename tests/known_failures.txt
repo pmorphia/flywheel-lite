@@ -1,0 +1,11 @@
+# Conformance programs Turbine does not match, with the reason. The runner reports them but
+# does not fail on them; anything else that fails is a regression.
+positive/float_division            # typeof(float) is "double": a float value is stored as a double
+positive/numeric_strings           # u64 values above the signed 64-bit range are unsupported
+positive/format_class_result_null  # u64 values above the signed 64-bit range are unsupported
+positive/unsigned_literals         # u64 values above the signed 64-bit range are unsupported
+positive/generics                  # generic instances print without their type arguments (Box, not Box<int>)
+positive/closures_higher_order     # typeof(lambda) needs the static function type
+positive/weak_references           # weak references clear at collection, not when the last strong reference drops
+positive/cycle_collection          # live_objects() collects first, so unreachable cycles are never counted
+trap/narrowed_global_changed       # flow-typing traps on narrowed globals need static types

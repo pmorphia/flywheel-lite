@@ -1,0 +1,41 @@
+function counter() returns function() returns int
+    int count = 0
+    return function() returns int
+        count += 1
+        return count
+    end
+end
+var c = counter()
+c()
+c()
+print c(), counter()()
+
+(function() returns int)[] fns = []
+for i in 0..<3 do
+    fns.push(function() => i * 10)
+end
+print fns.map(function(function() returns int f) => f())
+
+var total = 0
+[1, 2, 3, 4].each(function(int x)
+    total += x
+end)
+print total
+
+var words = ["pear", "fig", "banana", "kiwi"]
+words.sort(function(string a, string b) => a.length < b.length)
+print words, words.filter(function(string w) => w.contains("i")), words.reduce(0, function(int acc, string w) => acc + w.length)
+print words.any(function(string w) => w.starts_with("b")), words.all(function(string w) => w.length > 3)
+
+var text = "  Héllo, Wörld!  "
+print "[{text.trim()}]", text.trim().length, text.upper().trim(), text.trim().lower()
+print "a,b,,c".split(","), "one  two three".split(), "x-y-z".replace("-", "+")
+print "hello".find("l"), "hello".find_last("l"), "hello".count("l"), "hello"[1], "hello"[1..3], "hello"[-3..-1]
+print "abc".reverse(), "ab" * 3, "7".pad_start(3, "0"), "7".pad_end(3, "."), "😀x".length
+print ", ".join(["a", "b"]), [1, 2, 3].join("-"), "line1\nline2\r\nline3".lines()
+var price = 1234.5
+print "{price:,.2f}|{42:>6}|{0.256:.1%}|{255:#x}|{"ok":*^6}|{7:05}|{3.14159:.3}"
+print "{{literal}}", "{ spaced }", 'c', 'é' < 'z', int('A'), char(66)
+print string(3.0), string(0.1 + 0.2), 1e21, -0.5, 2.5e-7, 10 / 4, 7 // 2, 7 % 3, -7 // 2
+print int("42") + 1, double("2.5") * 2.0, bool("true"), [0] * 3
+print typeof(1), typeof(1.5), typeof("s"), typeof([1]), typeof({"a": 1}), typeof(null)

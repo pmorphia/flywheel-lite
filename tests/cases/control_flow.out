@@ -1,0 +1,12 @@
+checked 4
+checked 5
+1
+0..2.3..
+inner finally
+outer finally
+outer from inner
+3
+deferred [0, 1, 2, 3]
+4
+Custom named error
+index: index out of bounds

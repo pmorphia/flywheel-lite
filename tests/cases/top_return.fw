@@ -1,0 +1,5 @@
+print "before"
+if true then
+    return 3
+end
+print "after"

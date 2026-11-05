@@ -1,0 +1,16 @@
+import "lib/shapes.fw" as geo
+import "lib/shapes.fw"
+
+var r = geo.make(2.0, 3.5)
+print r.area(), r.name(), r is geo.Shape
+print geo.created, shapes.created, geo.reveal()
+geo.Shape s = geo.Rect(1.0, 1.0)
+print s.area()
+function total(geo.Shape[] items) returns double
+    var sum = 0.0
+    for item in items do
+        sum += item.area()
+    end
+    return sum
+end
+print total([r, geo.make(1.0, 4.0)]), geo.created
