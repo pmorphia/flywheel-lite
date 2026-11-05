@@ -1,10 +1,10 @@
-# Turbine: a Flywheel bytecode VM. Needs only a C11 compiler and libm.
-#   make            release build in build/turbine
-#   make debug      debug build with sanitizers in build-debug/turbine
-#   make test       run the conformance and Turbine test suites
-#   make install    install to $(PREFIX)/bin (default /usr/local)
+# Flywheel Lite: a Flywheel bytecode VM. Needs only a C11 compiler and libm.
+#   make            release build in build/flywheel-lite
+#   make debug      debug build with sanitizers in build-debug/flywheel-lite
+#   make test       run the conformance and Flywheel Lite test suites
+#   make install    install flywheel-lite and its short alias fwl to $(PREFIX)/bin (default /usr/local)
 # Needs a Flywheel checkout (github.com/fwlang/flywheel) for the stdlib and conformance suite:
-# FLYWHEEL_DIR defaults to .. (turbine cloned inside the flywheel checkout).
+# FLYWHEEL_DIR defaults to .. (flywheel-lite cloned inside the flywheel checkout).
 
 CC      ?= cc
 CFLAGS  ?= -O2
@@ -19,7 +19,7 @@ HEADERS := $(wildcard src/*.h)
 LIBMODS := csv url log args bigint decimal
 LIBSRC  := $(foreach m,$(LIBMODS),$(STDLIB)/$(m).fw)
 
-all: $(BUILD)/turbine
+all: $(BUILD)/flywheel-lite
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -30,18 +30,19 @@ $(BUILD)/embed: tools/embed.c | $(BUILD)
 $(BUILD)/stdlib_embed.c: $(BUILD)/embed $(LIBSRC)
 	$(BUILD)/embed $@ $(foreach m,$(LIBMODS),$(m)=$(STDLIB)/$(m).fw)
 
-$(BUILD)/turbine: $(SOURCES) $(HEADERS) $(BUILD)/stdlib_embed.c
+$(BUILD)/flywheel-lite: $(SOURCES) $(HEADERS) $(BUILD)/stdlib_embed.c
 	$(CC) -std=c11 $(CFLAGS) $(WARN) -Isrc -o $@ $(SOURCES) $(BUILD)/stdlib_embed.c -lm
 
 debug:
 	$(MAKE) BUILD=build-debug CFLAGS="-O0 -g -fsanitize=address,undefined -fno-omit-frame-pointer"
 
-test: $(BUILD)/turbine
-	FLYWHEEL_DIR=$(FLYWHEEL_DIR) python3 tests/run_tests.py $(BUILD)/turbine
+test: $(BUILD)/flywheel-lite
+	FLYWHEEL_DIR=$(FLYWHEEL_DIR) python3 tests/run_tests.py $(BUILD)/flywheel-lite
 
-install: $(BUILD)/turbine
+install: $(BUILD)/flywheel-lite
 	mkdir -p $(DESTDIR)$(PREFIX)/bin
-	cp $(BUILD)/turbine $(DESTDIR)$(PREFIX)/bin/turbine
+	cp $(BUILD)/flywheel-lite $(DESTDIR)$(PREFIX)/bin/flywheel-lite
+	ln -sf flywheel-lite $(DESTDIR)$(PREFIX)/bin/fwl
 
 clean:
 	rm -rf build build-debug

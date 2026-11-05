@@ -1,7 +1,7 @@
-/* Turbine: a bytecode virtual machine that runs Flywheel (.fw / .fly) source directly.
+/* Flywheel Lite: a bytecode virtual machine that runs Flywheel (.fw / .fly) source directly.
  * C11, no dependencies beyond the C standard library and libm. */
-#ifndef TURBINE_H
-#define TURBINE_H
+#ifndef LITE_H
+#define LITE_H
 
 /* POSIX and platform declarations (realpath, popen, clock_gettime, ...) under -std=c11. */
 #if defined(_WIN32)
@@ -30,8 +30,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define TURBINE_VERSION "0.1.0"
-#define TURBINE_LANGUAGE "2.9"
+#define LITE_VERSION "0.1.0"
+#define LITE_LANGUAGE "2.9"
 
 #if defined(__GNUC__) || defined(__clang__)
 #define TB_NORETURN __attribute__((noreturn))

@@ -1,36 +1,37 @@
-# Turbine
+# Flywheel Lite
 
-Turbine runs Flywheel programs (`.fw` / `.fly`) directly on a bytecode virtual machine. It is
+Flywheel Lite runs Flywheel programs (`.fw` / `.fly`) directly on a bytecode virtual machine. It is
 not a new language: it reads the same source as the Flywheel compiler and aims to print the same
-output. Where the compiler builds a native executable through LLVM, Turbine compiles a file to
+output. Where the compiler builds a native executable through LLVM, Flywheel Lite compiles a file to
 bytecode in memory and runs it straight away.
 
 Why it exists:
 
-1. **macOS support.** Turbine is portable C11 with no platform toolchain requirements, so it runs
+1. **macOS support.** Flywheel Lite is portable C11 with no platform toolchain requirements, so it runs
    on macOS as well as Linux and Windows.
 2. **Fewer dependencies, faster install.** Building needs only a C compiler: no LLVM, no C++20
    toolchain, no linker at run time, nothing downloaded. A clean build takes a few seconds.
 3. **Lightweight.** One ~0.5 MB executable that depends only on the C library; about 1 ms to start.
 
 ```sh
-turbine hello.fw
-turbine run app.fw -- one two      # program arguments after --
-turbine -s 'print 6 * 7'
+flywheel-lite hello.fw
+flywheel-lite run app.fw -- one two      # program arguments after --
+flywheel-lite -s 'print 6 * 7'
+fwl hello.fw                       # fwl is a short alias for flywheel-lite
 ```
 
 ## Build
 
 Any C11 compiler works (GCC, Clang, Apple Clang, MSVC). The build embeds library modules from
 a [Flywheel](https://github.com/fwlang/flywheel) checkout, and the tests run its conformance
-suite. By default that checkout is the parent directory, so clone Turbine inside it:
+suite. By default that checkout is the parent directory, so clone Flywheel Lite inside it:
 
 ```sh
 git clone https://github.com/fwlang/flywheel && cd flywheel
-git clone https://github.com/fwlang/turbine && cd turbine
-make                      # build/turbine
-make test                 # needs Python 3; runs the conformance and Turbine suites
-make install PREFIX=~/.local
+git clone https://github.com/fwlang/flywheel-lite && cd flywheel-lite
+make                      # build/flywheel-lite
+make test                 # needs Python 3; runs the conformance and Flywheel Lite suites
+make install PREFIX=~/.local     # installs flywheel-lite and the fwl alias
 ```
 
 With CMake (also the way to build with MSVC on Windows):
@@ -53,17 +54,20 @@ so the installed binary is self-contained. `make debug` builds with AddressSanit
 
 | Command | Effect |
 |---|---|
-| `turbine FILE [ARGS...]` / `turbine run FILE [-- ARGS...]` | run a program; a top-level `return n` exits with status `n` |
-| `turbine run -s CODE` | run code from the command line (`-` as FILE reads standard input) |
-| `turbine check FILE` | parse and compile without running |
-| `turbine debug FILE` | run, then print the top-level return value and the CPU time |
-| `turbine export FILE OUTPUT` | run, then write the top-level return value to `OUTPUT` |
-| `turbine disasm FILE` | print the compiled bytecode |
-| `turbine repl` | interactive session; a trailing expression's value is printed |
+| `flywheel-lite FILE [ARGS...]` / `flywheel-lite run FILE [-- ARGS...]` | run a program; a top-level `return n` exits with status `n` |
+| `flywheel-lite run -s CODE` | run code from the command line (`-` as FILE reads standard input) |
+| `flywheel-lite check FILE` | parse and compile without running |
+| `flywheel-lite debug FILE` | run, then print the top-level return value and the CPU time |
+| `flywheel-lite export FILE OUTPUT` | run, then write the top-level return value to `OUTPUT` |
+| `flywheel-lite disasm FILE` | print the compiled bytecode |
+| `flywheel-lite repl` | interactive session; a trailing expression's value is printed |
+
+`fwl` is a short alias for `flywheel-lite` (`fwl hello.fw`, `fwl repl`); `make install` and
+`cmake --install` create it next to the executable.
 
 Errors use the compiler's formats: `file:line:col: error: ...` for compile errors and
 `Flywheel runtime error: Type: message` (plus the failing location) for uncaught errors, with exit
-status 1. Set `TURBINE_TRACE=1` for a full stack trace.
+status 1. Set `LITE_TRACE=1` for a full stack trace.
 
 ## What runs
 
@@ -84,19 +88,19 @@ and timeouts), `time`, `io`, `json` (parse, encode, typed `decode`, `Class.from_
 `<json>` literals), `testing`, `collections`, `encoding`, `uuid`, `gc`, and `html`/`svg`
 (rendering, `html.parse`, CSS selector queries, mutation, parent and sibling links).
 
-Not available in Turbine (importing one reports it clearly; use the Flywheel compiler for these):
+Not available in Flywheel Lite (importing one reports it clearly; use the Flywheel compiler for these):
 `web`, `net`, `thread`, `sqlite`, `regex`, `desktop`, `crypto`, `compress`, `toml`, `yaml`,
 `flywheel`, native `import c/cxx/rust/zig`, and URL imports. On Windows, `os.run`/`os.process`
 capture standard output only and ignore timeouts.
 
 ## Differences from the compiler
 
-Turbine is dynamically typed at run time. Declared types still matter where they change values
+Flywheel Lite is dynamically typed at run time. Declared types still matter where they change values
 (an `int` assigned to a `double`, an array literal assigned to a tuple type, `{}` as a set, a
 `json.value` decoded into a class, a `weak<T>` field) and are checked at typed declarations, but
 there is no static type checker. So:
 
-- Programs the compiler rejects can run under Turbine until they reach the problem: type
+- Programs the compiler rejects can run under Flywheel Lite until they reach the problem: type
   mismatches surface as `TypeError` when executed, a non-exhaustive `match` raises `MatchError`
   only if no case applies, and missing returns yield `null`. Use `flywheel check` to validate.
 - `private` and `readonly` class members are not enforced (module-level `private` and `const` are).
@@ -111,24 +115,24 @@ there is no static type checker. So:
 
 ## Tests
 
-`python3 tests/run_tests.py build/turbine` runs:
+`python3 tests/run_tests.py build/flywheel-lite` runs:
 
 - every positive, input, and runtime-trap program from the compiler's regression suite
   (`$FLYWHEEL_DIR/tests/test_compiler.py`), comparing output byte for byte (programs using unavailable modules
   are skipped and counted);
-- Turbine's own cases in `tests/cases`, whose expected output was produced by the Flywheel compiler.
+- Flywheel Lite's own cases in `tests/cases`, whose expected output was produced by the Flywheel compiler.
 
 Current result on Linux: 174 of 183 pass; the 9 others are the known differences above.
-`TURBINE_GC_STRESS=1` collects at every safepoint, which together with `make debug` checks that
+`LITE_GC_STRESS=1` collects at every safepoint, which together with `make debug` checks that
 the runtime roots every live value.
 
 ## Performance
 
 A computed-goto dispatch loop (a portable `switch` loop on MSVC, or with
-`-DTURBINE_SWITCH_DISPATCH`), inline caches for fields and methods, and a fast path for integer
+`-DLITE_SWITCH_DISPATCH`), inline caches for fields and methods, and a fast path for integer
 `for` ranges. Measured on Linux x86-64: recursive `fib(32)` 0.18 s (CPython 3.14: 0.17 s), and a
 3-million-iteration arithmetic loop plus string building and 200k map writes 0.16 s (CPython:
-0.30 s). Natively compiled Flywheel is much faster for compute-bound code; Turbine is for
+0.30 s). Natively compiled Flywheel is much faster for compute-bound code; Flywheel Lite is for
 starting quickly and running anywhere.
 
 ## Layout

@@ -1,12 +1,12 @@
 /* Allocation, object construction, interning, tables, and the mark-sweep collector.
  * Collection only happens at VM safepoints (calls and loop back-edges), so native code may
  * hold unrooted objects except across calls back into the VM (use push_root). */
-#include "turbine.h"
+#include "lite.h"
 
 void *xmalloc(size_t n) {
     void *p = malloc(n ? n : 1);
     if (!p) {
-        fputs("turbine: out of memory\n", stderr);
+        fputs("flywheel-lite: out of memory\n", stderr);
         exit(70);
     }
     return p;
@@ -14,7 +14,7 @@ void *xmalloc(size_t n) {
 void *xrealloc(void *p, size_t n) {
     void *q = realloc(p, n ? n : 1);
     if (!q) {
-        fputs("turbine: out of memory\n", stderr);
+        fputs("flywheel-lite: out of memory\n", stderr);
         exit(70);
     }
     return q;
@@ -49,7 +49,7 @@ Obj *alloc_obj(VM *vm, size_t size, ObjType type) {
 
 void push_root(VM *vm, Value v) {
     if (vm->root_count >= (int)(sizeof vm->roots / sizeof vm->roots[0])) {
-        fputs("turbine: too many temporary roots\n", stderr);
+        fputs("flywheel-lite: too many temporary roots\n", stderr);
         abort();
     }
     vm->roots[vm->root_count++] = v;
@@ -94,7 +94,7 @@ int utf8_count(const char *s, size_t n) {
 }
 static ObjString *str_alloc(VM *vm, const char *chars, size_t len, uint32_t hash) {
     if (len > 0x7fffffff) {
-        fputs("turbine: string too large\n", stderr);
+        fputs("flywheel-lite: string too large\n", stderr);
         exit(70);
     }
     ObjString *s = (ObjString *)alloc_obj(vm, sizeof(ObjString) + len + 1, OBJ_STRING);

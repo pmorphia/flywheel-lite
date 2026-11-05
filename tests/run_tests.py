@@ -1,12 +1,12 @@
-"""Turbine test runner.
+"""Flywheel Lite test runner.
 
 1. Conformance: runs the positive, input, and trap programs from the Flywheel compiler's
    regression suite ($FLYWHEEL_DIR/tests/test_compiler.py, default ../) and compares output byte for byte.
-   Programs that import modules Turbine does not provide are reported as skipped.
-2. Turbine cases: tests/cases/NAME.fw with NAME.out (expected stdout) and optionally
+   Programs that import modules Flywheel Lite does not provide are reported as skipped.
+2. Flywheel Lite cases: tests/cases/NAME.fw with NAME.out (expected stdout) and optionally
    NAME.err (a substring of stderr) and NAME.code (expected exit status).
 
-usage: python3 tests/run_tests.py path/to/turbine [-v] [-k substring] [--only cases|conformance]
+usage: python3 tests/run_tests.py path/to/flywheel-lite [-v] [-k substring] [--only cases|conformance]
 """
 
 import os
@@ -61,11 +61,11 @@ def load_known():
     return known
 
 
-def run(turbine, source, cwd, stdin=None, args=()):
+def run(lite, source, cwd, stdin=None, args=()):
     path = Path(cwd) / "program.fw"
     path.write_text(source, encoding="utf-8")
     try:
-        return subprocess.run([turbine, str(path), *args], cwd=cwd, input=stdin, capture_output=True,
+        return subprocess.run([lite, str(path), *args], cwd=cwd, input=stdin, capture_output=True,
                               text=True, encoding="utf-8", errors="replace", timeout=20)
     except subprocess.TimeoutExpired:
         return None
@@ -76,7 +76,7 @@ def main():
     if not argv:
         print(__doc__)
         return 2
-    turbine = str(Path(argv[0]).resolve())
+    lite = str(Path(argv[0]).resolve())
     verbose = "-v" in argv
     pattern = argv[argv.index("-k") + 1] if "-k" in argv else None
     only = argv[argv.index("--only") + 1] if "--only" in argv else None
@@ -105,7 +105,7 @@ def main():
                 skips[why] = skips.get(why, 0) + 1
                 continue
             with tempfile.TemporaryDirectory() as tmp:
-                r = run(turbine, source, tmp, stdin)
+                r = run(lite, source, tmp, stdin)
             if r is None:
                 check(name, False, "timed out")
                 continue
@@ -123,7 +123,7 @@ def main():
                 skips[why] = skips.get(why, 0) + 1
                 continue
             with tempfile.TemporaryDirectory() as tmp:
-                r = run(turbine, source, tmp)
+                r = run(lite, source, tmp)
             if r is None:
                 check(name, False, "timed out")
                 continue
@@ -139,7 +139,7 @@ def main():
             err = src.with_suffix(".err").read_text(encoding="utf-8").strip() if src.with_suffix(".err").exists() else None
             code = int(src.with_suffix(".code").read_text()) if src.with_suffix(".code").exists() else (1 if err else 0)
             stdin = src.with_suffix(".in").read_text(encoding="utf-8") if src.with_suffix(".in").exists() else None
-            r = subprocess.run([turbine, str(src)], cwd=src.parent, input=stdin, capture_output=True, text=True,
+            r = subprocess.run([lite, str(src)], cwd=src.parent, input=stdin, capture_output=True, text=True,
                                encoding="utf-8", errors="replace", timeout=60)
             ok = r.returncode == code and r.stdout == expected and (err is None or err in r.stderr)
             check(name, ok, f"exit {r.returncode} (want {code})\n--- expected\n{expected}--- got\n{r.stdout}--- stderr\n{r.stderr}")

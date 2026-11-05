@@ -1,6 +1,6 @@
-/* turbine: runs Flywheel source files directly on a bytecode virtual machine. */
+/* flywheel-lite: runs Flywheel source files directly on a bytecode virtual machine. */
 #include "opcodes.h"
-#include "turbine.h"
+#include "lite.h"
 #include <errno.h>
 #include <math.h>
 #include <time.h>
@@ -37,19 +37,20 @@ static char *read_path(const char *path, size_t *len) {
 }
 
 static void usage(FILE *f) {
-    fputs("Turbine " TURBINE_VERSION " - runs Flywheel (.fw, .fly) programs on a bytecode VM\n"
+    fputs("Flywheel Lite " LITE_VERSION " - runs Flywheel (.fw, .fly) programs on a bytecode VM\n"
           "\n"
           "usage:\n"
-          "  turbine FILE [ARGS...]           run a program\n"
-          "  turbine run FILE [-- ARGS...]    run a program\n"
-          "  turbine run -s CODE              run code given on the command line\n"
-          "  turbine check FILE               compile without running\n"
-          "  turbine debug FILE [ARGS...]     run, then print the top-level return value and run time\n"
-          "  turbine export FILE OUTPUT       run, then write the top-level return value to OUTPUT\n"
-          "  turbine disasm FILE              print the compiled bytecode\n"
-          "  turbine repl                     interactive session\n"
-          "  turbine --version                print the version\n"
+          "  flywheel-lite FILE [ARGS...]           run a program\n"
+          "  flywheel-lite run FILE [-- ARGS...]    run a program\n"
+          "  flywheel-lite run -s CODE              run code given on the command line\n"
+          "  flywheel-lite check FILE               compile without running\n"
+          "  flywheel-lite debug FILE [ARGS...]     run, then print the top-level return value and run time\n"
+          "  flywheel-lite export FILE OUTPUT       run, then write the top-level return value to OUTPUT\n"
+          "  flywheel-lite disasm FILE              print the compiled bytecode\n"
+          "  flywheel-lite repl                     interactive session\n"
+          "  flywheel-lite --version                print the version\n"
           "\n"
+          "fwl is a short alias: fwl FILE, fwl repl, ...\n"
           "A top-level `return n` exits with status n. Use - as FILE to read standard input.\n",
           f);
 }
@@ -283,7 +284,7 @@ static int compile_only(VM *vm, const char *path, const char *src, size_t len, b
 static int repl(VM *vm) {
     bool tty = isatty(fileno(stdin));
     if (tty)
-        printf("Turbine %s (Flywheel %s) - type `exit` or press Ctrl-D to leave\n", TURBINE_VERSION, TURBINE_LANGUAGE);
+        printf("Flywheel Lite %s (Flywheel %s) - type `exit` or press Ctrl-D to leave\n", LITE_VERSION, LITE_LANGUAGE);
     /* One module holds the session's globals; import lines are replayed before each input
      * because import aliases are compile-time names. */
     ObjModule *session_module = new_module(vm, str_intern_c(vm, "main"));
@@ -401,7 +402,7 @@ int main(int argc, char **argv) {
     const char *cmd = argv[1];
     int argi = 2;
     if (!strcmp(cmd, "--version") || !strcmp(cmd, "-v") || !strcmp(cmd, "version")) {
-        printf("turbine %s (Flywheel %s)\n", TURBINE_VERSION, TURBINE_LANGUAGE);
+        printf("flywheel-lite %s (Flywheel %s)\n", LITE_VERSION, LITE_LANGUAGE);
         return 0;
     }
     if (!strcmp(cmd, "--help") || !strcmp(cmd, "-h") || !strcmp(cmd, "help")) {
@@ -422,7 +423,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(cmd, "repl"))
         mode = REPL;
     else
-        argi = 1; /* turbine FILE ... */
+        argi = 1; /* flywheel-lite FILE ... */
 
     VM *vm = xmalloc(sizeof(VM));
     const char *exe_dir = exe_dir_of(argv[0]);
@@ -441,7 +442,7 @@ int main(int argc, char **argv) {
     size_t len = 0;
     if (!strcmp(argv[argi], "-s") || !strcmp(argv[argi], "-e")) {
         if (argi + 1 >= argc) {
-            fputs("turbine: -s needs code\n", stderr);
+            fputs("flywheel-lite: -s needs code\n", stderr);
             return 2;
         }
         path = "<command line>";
@@ -457,7 +458,7 @@ int main(int argc, char **argv) {
         } else {
             source = read_path(path, &len);
             if (!source) {
-                fprintf(stderr, "turbine: cannot read %s: %s\n", path, strerror(errno));
+                fprintf(stderr, "flywheel-lite: cannot read %s: %s\n", path, strerror(errno));
                 return 1;
             }
         }
@@ -465,7 +466,7 @@ int main(int argc, char **argv) {
     const char *output = NULL;
     if (mode == EXPORT) {
         if (argi >= argc) {
-            fputs("turbine: export needs an output file\n", stderr);
+            fputs("flywheel-lite: export needs an output file\n", stderr);
             return 2;
         }
         output = argv[argi++];
@@ -492,11 +493,11 @@ int main(int argc, char **argv) {
         }
         if (mode == DEBUG) {
             printf("%s\n", b.data ? b.data : "");
-            fprintf(stderr, "turbine: ran in %.3f s (CPU)\n", (double)clock() / CLOCKS_PER_SEC - start);
+            fprintf(stderr, "flywheel-lite: ran in %.3f s (CPU)\n", (double)clock() / CLOCKS_PER_SEC - start);
         } else {
             FILE *f = fopen(output, "wb");
             if (!f) {
-                fprintf(stderr, "turbine: cannot write %s: %s\n", output, strerror(errno));
+                fprintf(stderr, "flywheel-lite: cannot write %s: %s\n", output, strerror(errno));
                 return 1;
             }
             fwrite(b.data ? b.data : "", 1, b.len, f);

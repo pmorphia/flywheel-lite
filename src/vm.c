@@ -1,6 +1,6 @@
 /* The bytecode interpreter: dispatch loop, calls, errors, members, classes, and modules. */
 #include "opcodes.h"
-#include "turbine.h"
+#include "lite.h"
 #include <math.h>
 
 #ifdef _WIN32
@@ -98,7 +98,7 @@ void vm_report_error(VM *vm, Value err) {
     ObjString *m = error_message(vm, err);
     fprintf(stderr, "Flywheel runtime error: %s: %s\n", t->chars, m->len ? m->chars : "exception");
     pop_root(vm, 1);
-    if (vm->trace[0] && getenv("TURBINE_TRACE") && strcmp(getenv("TURBINE_TRACE"), "0") != 0)
+    if (vm->trace[0] && getenv("LITE_TRACE") && strcmp(getenv("LITE_TRACE"), "0") != 0)
         fputs(vm->trace, stderr);
     else if (vm->trace[0]) {
         /* the innermost location only */
@@ -1593,7 +1593,7 @@ static RunResult run(VM *vm, int base) {
     CallFrame *frame = &vm->frames[vm->frame_count - 1];
     uint8_t *ip = frame->ip;
 
-#if (defined(__GNUC__) || defined(__clang__)) && !defined(TURBINE_SWITCH_DISPATCH)
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(LITE_SWITCH_DISPATCH)
     static void *labels[] = {
 #define X(name) &&L_##name,
         OPCODES(X)
@@ -3011,9 +3011,9 @@ ObjModule *vm_load_module(VM *vm, const char *name, const char *from_path, bool 
         return m;
     }
     if (!strncmp(name, "http://", 7) || !strncmp(name, "https://", 8) || strstr(name, "://"))
-        snprintf(err->message, sizeof err->message, "Turbine cannot import from URLs (%s); download the file and import it by path", name);
+        snprintf(err->message, sizeof err->message, "Flywheel Lite cannot import from URLs (%s); download the file and import it by path", name);
     else if (lib_is_native_module(name))
-        snprintf(err->message, sizeof err->message, "module '%s' is not available in Turbine; use the Flywheel compiler for it", name);
+        snprintf(err->message, sizeof err->message, "module '%s' is not available in Flywheel Lite; use the Flywheel compiler for it", name);
     else
         snprintf(err->message, sizeof err->message, "cannot find module '%s'", name);
     return NULL;
@@ -3046,7 +3046,7 @@ void vm_init(VM *vm, int argc, char **argv) {
     vm->s_name = str_intern_c(vm, "name");
     lib_core_init(vm);
     vm->gc_off--;
-    const char *stress = getenv("TURBINE_GC_STRESS");
+    const char *stress = getenv("LITE_GC_STRESS");
     if (stress && strcmp(stress, "0") != 0) {
         vm->gc_stress = true;
         vm->next_gc = 0;

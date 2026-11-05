@@ -1,6 +1,6 @@
 /* HTML tools: element methods and properties, CSS selectors, queries, mutation, and a
  * lenient HTML parser. */
-#include "turbine.h"
+#include "lite.h"
 #include <ctype.h>
 
 #define NATIVE(name) static bool name(VM *vm, int argc, Value *args, Value *out)

@@ -1,4 +1,4 @@
-# Conformance programs Turbine does not match, with the reason. The runner reports them but
+# Conformance programs Flywheel Lite does not match, with the reason. The runner reports them but
 # does not fail on them; anything else that fails is a regression.
 positive/float_division            # typeof(float) is "double": a float value is stored as a double
 positive/numeric_strings           # u64 values above the signed 64-bit range are unsupported

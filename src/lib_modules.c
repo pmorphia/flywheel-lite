@@ -1,6 +1,6 @@
 /* Native library modules: math, fs, os, time, io, testing, collections, encoding, uuid, html,
  * gc. Platform code is isolated here (POSIX: Linux and macOS; Windows: the CRT and Win32). */
-#include "turbine.h"
+#include "lite.h"
 #include <ctype.h>
 #include <errno.h>
 #include <math.h>

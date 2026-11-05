@@ -1,4 +1,4 @@
-/* Single-pass compiler from the Flywheel AST to Turbine bytecode. */
+/* Single-pass compiler from the Flywheel AST to Flywheel Lite bytecode. */
 #include "front.h"
 #include "opcodes.h"
 #include <ctype.h>
@@ -1955,7 +1955,7 @@ static void process_imports(Compiler *C) {
         ImportDecl *im = &p->imports[i];
         C->line = im->line;
         if (im->kind)
-            cfail(C, im->line, "native '%s' imports need the Flywheel compiler; Turbine does not build native code", im->kind);
+            cfail(C, im->line, "native '%s' imports need the Flywheel compiler; Flywheel Lite does not build native code", im->kind);
         bool native = false;
         CompileError sub;
         memset(&sub, 0, sizeof sub);

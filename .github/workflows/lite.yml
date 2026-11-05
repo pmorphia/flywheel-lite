@@ -1,4 +1,4 @@
-name: Turbine
+name: Flywheel Lite
 on:
   push:
   pull_request:
@@ -6,41 +6,41 @@ on:
 permissions:
   contents: read
 jobs:
-  turbine:
+  flywheel-lite:
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      # Turbine builds against a Flywheel checkout (stdlib + conformance suite), cloned
+      # Flywheel Lite builds against a Flywheel checkout (stdlib + conformance suite), cloned
       # inside it as in local development.
       - uses: actions/checkout@v4
         with:
           repository: fwlang/flywheel
       - uses: actions/checkout@v4
         with:
-          path: turbine
+          path: flywheel-lite
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - name: Build (make)
         if: runner.os != 'Windows'
-        working-directory: turbine
+        working-directory: flywheel-lite
         run: make
       - name: Build (CMake, MSVC)
         if: runner.os == 'Windows'
-        working-directory: turbine
+        working-directory: flywheel-lite
         run: |
           cmake -S . -B build
           cmake --build build --config Release
-          copy build\Release\turbine.exe build\turbine.exe
+          copy build\Release\flywheel-lite.exe build\flywheel-lite.exe
       - name: Test
-        working-directory: turbine
-        run: python tests/run_tests.py build/turbine
+        working-directory: flywheel-lite
+        run: python tests/run_tests.py build/flywheel-lite
       - name: GC stress
         if: runner.os != 'Windows'
-        working-directory: turbine
+        working-directory: flywheel-lite
         env:
-          TURBINE_GC_STRESS: "1"
-        run: python tests/run_tests.py build/turbine --only conformance
+          LITE_GC_STRESS: "1"
+        run: python tests/run_tests.py build/flywheel-lite --only conformance

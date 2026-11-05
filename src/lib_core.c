@@ -1,5 +1,5 @@
 /* Core library: builtin functions, casts, and methods of builtin types. */
-#include "turbine.h"
+#include "lite.h"
 #include <ctype.h>
 #include <errno.h>
 #include <math.h>

@@ -1,8 +1,8 @@
 /* Front end: tokens, AST, and parser shared between lexer.c, parser.c, and compiler.c. */
-#ifndef TURBINE_FRONT_H
-#define TURBINE_FRONT_H
+#ifndef LITE_FRONT_H
+#define LITE_FRONT_H
 
-#include "turbine.h"
+#include "lite.h"
 #include <setjmp.h>
 
 /* Lexical helpers shared with the parser (positions are byte offsets; -1 on error). */

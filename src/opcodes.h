@@ -1,6 +1,6 @@
 /* Bytecode instruction set. Operands are big-endian u16 unless noted. */
-#ifndef TURBINE_OPCODES_H
-#define TURBINE_OPCODES_H
+#ifndef LITE_OPCODES_H
+#define LITE_OPCODES_H
 
 #define OPCODES(X)                                                                                \
     X(OP_CONST)          /* u16 const */                                                          \
