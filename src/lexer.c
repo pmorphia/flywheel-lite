@@ -258,8 +258,8 @@ static void validate_utf8(Lexer *L) {
     }
 }
 
-bool lex_source(Arena *arena, const char *src, size_t len, TokenList *out, CompileError *err,
-                int line_offset) {
+static bool lex_text(Arena *arena, const char *src, size_t len, TokenList *out, CompileError *err,
+                     int line_offset) {
     Lexer L;
     memset(&L, 0, sizeof L);
     L.src = src;
@@ -449,4 +449,21 @@ bool lex_source(Arena *arena, const char *src, size_t len, TokenList *out, Compi
         lfail(&L, "unclosed delimiter");
     emit(&L, T_EOF, "", 0, L.p);
     return true;
+}
+
+bool lex_source(Arena *arena, const char *src, size_t len, TokenList *out, CompileError *err,
+                int line_offset) {
+    /* CRLF line endings (Windows editors, or text-mode writes) read as LF, so a string literal
+       that spans lines holds "\n" rather than "\r\n". */
+    if (len && memchr(src, '\r', len)) {
+        char *copy = arena_alloc(arena, len + 1);
+        size_t m = 0;
+        for (size_t i = 0; i < len; i++)
+            if (src[i] != '\r' || i + 1 >= len || src[i + 1] != '\n')
+                copy[m++] = src[i];
+        copy[m] = '\0';
+        src = copy;
+        len = m;
+    }
+    return lex_text(arena, src, len, out, err, line_offset);
 }
