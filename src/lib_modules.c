@@ -1781,9 +1781,9 @@ NATIVE(ts_assert) {
     if (!IS_BOOL(args[0]))
         return vm_throw(vm, "TypeError", "testing.assert expects a bool");
     if (!args[0].as.b) {
-        if (argc > 1 && IS_STRING(args[1]) && AS_STRING(args[1])->len)
-            return vm_throw(vm, "AssertionError", "assertion failed: %s", AS_CSTR(args[1]));
-        return vm_throw(vm, "AssertionError", "assertion failed");
+        /* The compiler's wording, including the trailing space when there is no message. */
+        return vm_throw(vm, "AssertionError", "assertion failed: %s",
+                        argc > 1 && IS_STRING(args[1]) ? AS_CSTR(args[1]) : "");
     }
     *out = val_null();
     return true;
@@ -1795,6 +1795,7 @@ NATIVE(ts_assert_equal) {
     if (!eq) {
         Buf b;
         buf_init(&b);
+        buf_adds(&b, "assertion failed: ");
         if (argc > 2 && IS_STRING(args[2]) && AS_STRING(args[2])->len) {
             buf_adds(&b, AS_CSTR(args[2]));
             buf_adds(&b, ": ");
@@ -1814,16 +1815,11 @@ NATIVE(ts_assert_equal) {
 NATIVE(ts_fail) {
     const char *msg = argc > 0 && IS_STRING(args[0]) ? AS_CSTR(args[0]) : "failed";
     (void)out;
-    return vm_throw(vm, "AssertionError", "%s", msg);
+    return vm_throw(vm, "AssertionError", "assertion failed: %s", msg);
 }
 NATIVE(ts_expect_error) {
     (void)argc;
     Value fn = args[1];
-    Value r;
-    if (vm_call(vm, fn, 0, NULL, &r))
-        return vm_throw(vm, "AssertionError", "expected an error, but none was raised");
-    Value err = vm->error;
-    vm->has_error = false;
     ObjString *want = NULL;
     if (IS_OBJT(args[0], OBJ_NATIVE) && IS_STRING(((ObjNative *)AS_OBJ(args[0]))->data))
         want = AS_STRING(((ObjNative *)AS_OBJ(args[0]))->data);
@@ -1831,14 +1827,19 @@ NATIVE(ts_expect_error) {
         want = AS_CLASS(args[0])->name;
     else if (IS_STRING(args[0]))
         want = AS_STRING(args[0]);
+    Value r;
+    if (vm_call(vm, fn, 0, NULL, &r))
+        return vm_throw(vm, "AssertionError", "expected %s, but nothing was raised", want ? want->chars : "Error");
+    Value err = vm->error;
+    vm->has_error = false;
     if (want && strcmp(want->chars, "Error") != 0) {
         ObjString *t = error_type_name(vm, err);
         bool ok = !strcmp(t->chars, want->chars);
         if (!ok && IS_OBJT(err, OBJ_INSTANCE))
             for (ObjClass *k = AS_INSTANCE(err)->klass; k && !ok; k = k->super)
                 ok = !strcmp(k->name->chars, want->chars);
-        if (!ok)
-            return vm_throw(vm, "AssertionError", "expected %s, got %s", want->chars, t->chars);
+        if (!ok) /* a different error propagates, as with the compiler */
+            return vm_throw_value(vm, err);
     }
     *out = err;
     return true;

@@ -52,18 +52,27 @@ so the installed binary is self-contained. `make debug` builds with AddressSanit
 
 ## Usage
 
+The command line follows the Flywheel compiler's:
+
 | Command | Effect |
 |---|---|
-| `flywheel-lite FILE [ARGS...]` / `flywheel-lite run FILE [-- ARGS...]` | run a program; a top-level `return n` exits with status `n` |
-| `flywheel-lite run -s CODE` | run code from the command line (`-` as FILE reads standard input) |
-| `flywheel-lite check FILE` | parse and compile without running |
-| `flywheel-lite debug FILE` | run, then print the top-level return value and the CPU time |
-| `flywheel-lite export FILE OUTPUT` | run, then write the top-level return value to `OUTPUT` |
-| `flywheel-lite disasm FILE` | print the compiled bytecode |
+| `flywheel-lite run SOURCE [options] [-- ARGS...]` / `flywheel-lite SOURCE [ARGS...]` | run a program; a top-level `return n` exits with status `n` |
+| `flywheel-lite check SOURCE` | parse and compile without running |
+| `flywheel-lite export SOURCE OUTPUT` / `-o OUTPUT` | run, then write the top-level return value to `OUTPUT` |
+| `flywheel-lite debug SOURCE [-- ARGS...]` | run, then print the top-level return value and the CPU time |
+| `flywheel-lite test [files or directories]` | run `test_*.fw` and `*_test.fw` files like `flywheel test`, with the same `setup`/`teardown`/`setup_all`/`teardown_all` fixtures and output |
+| `flywheel-lite disasm SOURCE` | print the compiled bytecode |
 | `flywheel-lite repl` | interactive session; a trailing expression's value is printed |
+| `flywheel-lite selftest` | run this checkout's test suite (needs Python 3) |
 
 `fwl` is a short alias for `flywheel-lite` (`fwl hello.fw`, `fwl repl`); `make install` and
 `cmake --install` create it next to the executable.
+
+SOURCE is a `.fw`/`.fly` path, or `-` for standard input. `-s CODE`, `--source CODE`, or
+`--source=CODE` in place of SOURCE runs code from the command line (diagnostics name it
+`<source>`); like every option, it can appear anywhere before `--`. `-O0`..`-O3` and `-g` are
+accepted and ignored, so compiler command lines work unchanged. `build`, `desktop`, `serve`,
+`fmt`, `doc`, `lsp`, and `test --coverage`/`--race` need the Flywheel compiler and say so.
 
 Errors use the compiler's formats: `file:line:col: error: ...` for compile errors and
 `Flywheel runtime error: Type: message` (plus the failing location) for uncaught errors, with exit

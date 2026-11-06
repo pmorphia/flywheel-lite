@@ -31,7 +31,7 @@ $(BUILD)/stdlib_embed.c: $(BUILD)/embed $(LIBSRC)
 	$(BUILD)/embed $@ $(foreach m,$(LIBMODS),$(m)=$(STDLIB)/$(m).fw)
 
 $(BUILD)/flywheel-lite: $(SOURCES) $(HEADERS) $(BUILD)/stdlib_embed.c
-	$(CC) -std=c11 $(CFLAGS) $(WARN) -Isrc -o $@ $(SOURCES) $(BUILD)/stdlib_embed.c -lm
+	$(CC) -std=c11 $(CFLAGS) $(WARN) -Isrc -DLITE_TEST_DIR='"$(abspath tests)"' -o $@ $(SOURCES) $(BUILD)/stdlib_embed.c -lm
 
 debug:
 	$(MAKE) BUILD=build-debug CFLAGS="-O0 -g -fsanitize=address,undefined -fno-omit-frame-pointer"

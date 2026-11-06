@@ -1,4 +1,5 @@
 /* flywheel-lite: runs Flywheel source files directly on a bytecode virtual machine. */
+#include "front.h"
 #include "opcodes.h"
 #include "lite.h"
 #include <errno.h>
@@ -12,6 +13,8 @@
 #define isatty _isatty
 #define fileno _fileno
 #else
+#include <dirent.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
@@ -37,21 +40,30 @@ static char *read_path(const char *path, size_t *len) {
 }
 
 static void usage(FILE *f) {
-    fputs("Flywheel Lite " LITE_VERSION " - runs Flywheel (.fw, .fly) programs on a bytecode VM\n"
+    fputs("Usage: flywheel-lite run SOURCE [options] [-- program arguments]\n"
+          "           run on the bytecode VM\n"
+          "       flywheel-lite check SOURCE [options]\n"
+          "           compile without running\n"
+          "       flywheel-lite export SOURCE OUTPUT [options] [program arguments]\n"
+          "           write the returned value to OUTPUT\n"
+          "       flywheel-lite debug SOURCE [options] [-- program arguments]\n"
+          "           print the returned value and run time\n"
+          "       flywheel-lite test [files or directories]\n"
+          "           run test_*.fw and *_test.fw files\n"
+          "       flywheel-lite disasm SOURCE [options]\n"
+          "           print the compiled bytecode\n"
+          "       flywheel-lite repl | selftest | --version\n"
           "\n"
-          "usage:\n"
-          "  flywheel-lite FILE [ARGS...]           run a program\n"
-          "  flywheel-lite run FILE [-- ARGS...]    run a program\n"
-          "  flywheel-lite run -s CODE              run code given on the command line\n"
-          "  flywheel-lite check FILE               compile without running\n"
-          "  flywheel-lite debug FILE [ARGS...]     run, then print the top-level return value and run time\n"
-          "  flywheel-lite export FILE OUTPUT       run, then write the top-level return value to OUTPUT\n"
-          "  flywheel-lite disasm FILE              print the compiled bytecode\n"
-          "  flywheel-lite repl                     interactive session\n"
-          "  flywheel-lite --version                print the version\n"
+          "SOURCE is a .fw/.fly path, or - for standard input; `flywheel-lite SOURCE [arguments]` runs it.\n"
+          "Use -s CODE (--source CODE) instead of SOURCE to run code from the command line.\n"
           "\n"
-          "fwl is a short alias: fwl FILE, fwl repl, ...\n"
-          "A top-level `return n` exits with status n. Use - as FILE to read standard input.\n",
+          "Options:\n"
+          "  -O0..-O3         accepted for compatibility (no effect)\n"
+          "  -g               accepted for compatibility (no effect)\n"
+          "  -o FILE          output file (export)\n"
+          "\n"
+          "build, desktop, serve, fmt, doc, and lsp need the Flywheel compiler.\n"
+          "fwl is a short alias: fwl SOURCE, fwl repl, ...\n",
           f);
 }
 
@@ -387,7 +399,199 @@ static int repl(VM *vm) {
     return 0;
 }
 
+/* ---------------------------------------------------------------- test */
+
+typedef struct {
+    char **items;
+    int count, cap;
+} PathList;
+static void paths_push(PathList *l, char *p) {
+    if (l->count == l->cap) {
+        l->cap = l->cap ? l->cap * 2 : 16;
+        l->items = xrealloc(l->items, sizeof(char *) * (size_t)l->cap);
+    }
+    l->items[l->count++] = p;
+}
+static int path_cmp(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+static bool ends_with(const char *s, size_t n, const char *suffix) {
+    size_t k = strlen(suffix);
+    return n >= k && !memcmp(s + n - k, suffix, k);
+}
+/* test_*.fw and *_test.fw (also .fly), as `flywheel test` finds them. */
+static bool is_test_file(const char *name) {
+    size_t n = strlen(name), stem;
+    if (ends_with(name, n, ".fw"))
+        stem = n - 3;
+    else if (ends_with(name, n, ".fly"))
+        stem = n - 4;
+    else
+        return false;
+    return !strncmp(name, "test_", 5) || (stem > 5 && !memcmp(name + stem - 5, "_test", 5));
+}
+static char *join_path(const char *dir, const char *name) {
+    size_t d = strlen(dir);
+    bool slash = d && (dir[d - 1] == '/' || dir[d - 1] == '\\');
+    char *p = xmalloc(d + strlen(name) + 2);
+    sprintf(p, "%s%s%s", dir, slash ? "" : "/", name);
+    return p;
+}
+/* Finds test files under dir, skipping build directories and hidden ones. */
+static void collect_tests(const char *dir, PathList *out) {
+    PathList names = {0};
+#ifdef _WIN32
+    char *pattern = join_path(dir, "*");
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    free(pattern);
+    if (h != INVALID_HANDLE_VALUE) {
+        do
+            paths_push(&names, xstrdup(fd.cFileName));
+        while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+#else
+    DIR *d = opendir(dir);
+    if (d) {
+        struct dirent *e;
+        while ((e = readdir(d)))
+            paths_push(&names, xstrdup(e->d_name));
+        closedir(d);
+    }
+#endif
+    for (int i = 0; i < names.count; i++) {
+        const char *name = names.items[i];
+        if (!strcmp(name, ".") || !strcmp(name, ".."))
+            continue;
+        char *path = join_path(dir, name);
+        int kind = tb_path_kind(path);
+        if (kind == 2 && strcmp(name, "build") && name[0] != '.')
+            collect_tests(path, out);
+        else if (kind == 1 && is_test_file(name)) {
+            paths_push(out, path);
+            continue;
+        }
+        free(path);
+    }
+    for (int i = 0; i < names.count; i++)
+        free(names.items[i]);
+    free(names.items);
+}
+static void add_str(Buf *b, const char *s) { buf_add(b, s, strlen(s)); }
+
+/* Runs each test file with a generated runner appended, like `flywheel test`: every top-level
+ * test_* function without parameters runs between the setup/teardown fixtures, and the file
+ * fails if any test throws. */
+static int run_tests(PathList *paths, const char *exe_dir) {
+    PathList files = {0};
+    if (!paths->count)
+        paths_push(paths, ".");
+    for (int i = 0; i < paths->count; i++) {
+        int kind = tb_path_kind(paths->items[i]);
+        if (kind == 2) {
+            collect_tests(paths->items[i], &files);
+        } else if (kind == 1)
+            paths_push(&files, xstrdup(paths->items[i]));
+        else {
+            fprintf(stderr, "flywheel-lite: no such test file or directory: %s\n", paths->items[i]);
+            return 2;
+        }
+    }
+    qsort(files.items, (size_t)files.count, sizeof(char *), path_cmp);
+    if (!files.count) {
+        fputs("flywheel-lite: no test files found (test_*.fw or *_test.fw)\n", stderr);
+        return 1;
+    }
+    int failed = 0;
+    for (int f = 0; f < files.count; f++) {
+        const char *path = files.items[f];
+        printf("%s\n", path);
+        fflush(stdout);
+        size_t len;
+        char *src = read_path(path, &len);
+        if (!src) {
+            fprintf(stderr, "flywheel-lite: cannot read %s: %s\n", path, strerror(errno));
+            failed++;
+            continue;
+        }
+        Buf program;
+        buf_init(&program);
+        buf_add(&program, src, len);
+        free(src);
+        /* A file that does not parse gets no runner; running it reports the error. */
+        Arena *arena = arena_new();
+        Program prog;
+        CompileError err;
+        memset(&prog, 0, sizeof prog);
+        memset(&err, 0, sizeof err);
+        if (parse_program(arena, program.data, program.len, &prog, &err)) {
+            bool fixture[4] = {false, false, false, false};
+            static const char *fixtures[4] = {"setup", "teardown", "setup_all", "teardown_all"};
+            int ntests = 0;
+            for (int i = 0; i < prog.nfunctions; i++) {
+                FuncDecl *fn = &prog.functions[i];
+                if (fn->owner || fn->nparams || !fn->name)
+                    continue;
+                if (!strncmp(fn->name, "test_", 5))
+                    ntests++;
+                for (int k = 0; k < 4; k++)
+                    if (!strcmp(fn->name, fixtures[k]))
+                        fixture[k] = true;
+            }
+            add_str(&program, "\nint __fw_failed = 0\n");
+            if (fixture[2])
+                add_str(&program, "setup_all()\n");
+            for (int i = 0; i < prog.nfunctions; i++) {
+                FuncDecl *fn = &prog.functions[i];
+                if (fn->owner || fn->nparams || !fn->name || strncmp(fn->name, "test_", 5))
+                    continue;
+                add_str(&program, "try\n");
+                if (fixture[1])
+                    add_str(&program, "    try\n");
+                const char *indent = fixture[1] ? "        " : "    ";
+                if (fixture[0]) {
+                    add_str(&program, indent);
+                    add_str(&program, "setup()\n");
+                }
+                add_str(&program, indent);
+                add_str(&program, fn->name);
+                add_str(&program, "()\n");
+                if (fixture[1])
+                    add_str(&program, "    finally\n        teardown()\n    end\n");
+                add_str(&program, "    print \"  ok   ");
+                add_str(&program, fn->name);
+                add_str(&program, "\"\ncatch Error __fw_error\n    print \"  FAIL ");
+                add_str(&program, fn->name);
+                add_str(&program, ": \" + __fw_error.message\n    __fw_failed += 1\nend\n");
+            }
+            if (fixture[3])
+                add_str(&program, "teardown_all()\n");
+            char tail[160];
+            snprintf(tail, sizeof tail,
+                     "if __fw_failed > 0 then\n    throw AssertionError(string(__fw_failed) + \" of %d test(s) "
+                     "failed\")\nend\n",
+                     ntests);
+            add_str(&program, tail);
+        }
+        arena_free(arena);
+        VM *vm = xmalloc(sizeof(VM));
+        vm_init(vm, 0, NULL);
+        vm->exe_dir = exe_dir;
+        Value result = val_null();
+        RunResult r = vm_run_main(vm, path, program.data, program.len, &result);
+        fflush(stdout);
+        if (r == RUN_ERROR || (r == RUN_EXIT && vm->exit_code != 0))
+            failed++;
+        buf_free(&program);
+    }
+    printf("%d test file(s), %d failed\n", files.count, failed);
+    return failed ? 1 : 0;
+}
+
 /* ---------------------------------------------------------------- main */
+
+static bool is_source_option(const char *a) {
+    return !strcmp(a, "-s") || !strcmp(a, "--source") || !strcmp(a, "-e") || !strncmp(a, "--source=", 9);
+}
 
 int main(int argc, char **argv) {
 #ifdef _WIN32
@@ -400,7 +604,6 @@ int main(int argc, char **argv) {
         return 2;
     }
     const char *cmd = argv[1];
-    int argi = 2;
     if (!strcmp(cmd, "--version") || !strcmp(cmd, "-v") || !strcmp(cmd, "version")) {
         printf("flywheel-lite %s (Flywheel %s)\n", LITE_VERSION, LITE_LANGUAGE);
         return 0;
@@ -409,7 +612,69 @@ int main(int argc, char **argv) {
         usage(stdout);
         return 0;
     }
+    static const char *compiler_only[] = {"build", "desktop", "serve", "fmt", "doc", "lsp"};
+    for (size_t i = 0; i < sizeof compiler_only / sizeof *compiler_only; i++)
+        if (!strcmp(cmd, compiler_only[i])) {
+            fprintf(stderr, "flywheel-lite: `%s` needs the Flywheel compiler: use `flywheel %s`\n", cmd, cmd);
+            return 2;
+        }
+    if (!strcmp(cmd, "new") || !strcmp(cmd, "get") || !strcmp(cmd, "add") || !strcmp(cmd, "install")) {
+        fprintf(stderr, "flywheel-lite: packages are managed by Pulley: use `pulley %s` (or `ppm %s`)\n", cmd, cmd);
+        return 2;
+    }
+    const char *exe_dir = exe_dir_of(argv[0]);
+    if (!strcmp(cmd, "selftest")) {
+#ifdef LITE_TEST_DIR
+#ifdef _WIN32
+        const char *python = "python";
+#else
+        const char *python = "python3";
+#endif
+        Buf b;
+        buf_init(&b);
+        add_str(&b, python);
+        add_str(&b, " \"" LITE_TEST_DIR "/run_tests.py\" \"");
+        add_str(&b, argv[0]);
+        buf_addc(&b, '"');
+        fflush(stdout);
+        int status = system(b.data);
+        if (status == -1) {
+            fprintf(stderr, "flywheel-lite: cannot run %s; Python 3 is required for the test harness\n", python);
+            return 1;
+        }
+#ifndef _WIN32
+        if (WIFEXITED(status))
+            status = WEXITSTATUS(status);
+#endif
+        return status;
+#else
+        fputs("flywheel-lite: selftest needs a build from a source checkout\n", stderr);
+        return 1;
+#endif
+    }
+    if (!strcmp(cmd, "test")) {
+        PathList paths = {0};
+        for (int i = 2; i < argc; i++) {
+            const char *a = argv[i];
+            if (strlen(a) == 3 && a[0] == '-' && a[1] == 'O' && a[2] >= '0' && a[2] <= '3')
+                continue;
+            if (!strcmp(a, "-g"))
+                continue;
+            if (!strcmp(a, "--coverage") || !strcmp(a, "--race")) {
+                fprintf(stderr, "flywheel-lite: %s needs the Flywheel compiler: use `flywheel test %s`\n", a, a);
+                return 2;
+            }
+            if (a[0] == '-') {
+                fprintf(stderr, "flywheel-lite: unknown or incomplete option: %s\n", a);
+                return 2;
+            }
+            paths_push(&paths, (char *)a);
+        }
+        return run_tests(&paths, exe_dir);
+    }
+
     enum { RUN, CHECK, DEBUG, EXPORT, DISASM, REPL } mode = RUN;
+    bool implicit = false; /* flywheel-lite SOURCE [ARGS...]: everything after SOURCE goes to the program */
     if (!strcmp(cmd, "run"))
         mode = RUN;
     else if (!strcmp(cmd, "check"))
@@ -422,58 +687,101 @@ int main(int argc, char **argv) {
         mode = DISASM;
     else if (!strcmp(cmd, "repl"))
         mode = REPL;
-    else
-        argi = 1; /* flywheel-lite FILE ... */
+    else if (cmd[0] == '-' && cmd[1] && !is_source_option(cmd)) {
+        usage(stderr);
+        return 2;
+    } else
+        implicit = !is_source_option(cmd); /* flywheel-lite -s CODE behaves as flywheel-lite run -s CODE */
 
     VM *vm = xmalloc(sizeof(VM));
-    const char *exe_dir = exe_dir_of(argv[0]);
     if (mode == REPL) {
         vm_init(vm, 0, NULL);
         vm->exe_dir = exe_dir;
-        int r = repl(vm);
-        return r;
+        return repl(vm);
     }
-    if (argi >= argc) {
-        usage(stderr);
-        return 2;
-    }
-    const char *path;
-    char *source = NULL;
-    size_t len = 0;
-    if (!strcmp(argv[argi], "-s") || !strcmp(argv[argi], "-e")) {
-        if (argi + 1 >= argc) {
-            fputs("flywheel-lite: -s needs code\n", stderr);
+
+    const char *path = NULL, *code = NULL, *output = NULL;
+    int nprogram = 0;
+    char **program_args = xmalloc(sizeof(char *) * (size_t)argc);
+    if (implicit) {
+        path = argv[1];
+        int i = 2;
+        if (i < argc && !strcmp(argv[i], "--"))
+            i++;
+        for (; i < argc; i++)
+            program_args[nprogram++] = argv[i];
+    } else {
+        /* Options may appear anywhere before `--`, as with the Flywheel compiler. */
+        const char **positionals = xmalloc(sizeof(char *) * (size_t)argc);
+        int npos = 0;
+        char **rest = NULL;
+        int nrest = 0;
+        for (int i = cmd[0] == '-' ? 1 : 2; i < argc; i++) {
+            const char *a = argv[i];
+            if (!strcmp(a, "--")) {
+                rest = argv + i + 1;
+                nrest = argc - i - 1;
+                break;
+            }
+            if (!strncmp(a, "--source=", 9)) {
+                code = a + 9;
+                continue;
+            }
+            if (is_source_option(a) && i + 1 < argc) {
+                code = argv[++i];
+                continue;
+            }
+            if (strlen(a) == 3 && a[0] == '-' && a[1] == 'O' && a[2] >= '0' && a[2] <= '3')
+                continue;
+            if (!strcmp(a, "-g"))
+                continue;
+            if (!strcmp(a, "-o") && i + 1 < argc && mode == EXPORT) {
+                output = argv[++i];
+                continue;
+            }
+            if (!strcmp(a, "-") || a[0] != '-') {
+                positionals[npos++] = a;
+                continue;
+            }
+            fprintf(stderr, "flywheel-lite: unknown or incomplete option: %s\n", a);
             return 2;
         }
-        path = "<command line>";
-        const char *code = argv[argi + 1];
-        source = xstrdup(code);
-        len = strlen(code);
-        argi += 2;
-    } else {
-        path = argv[argi++];
-        if (!strcmp(path, "-")) {
-            source = read_all(stdin, &len);
-            path = "<stdin>";
-        } else {
-            source = read_path(path, &len);
-            if (!source) {
-                fprintf(stderr, "flywheel-lite: cannot read %s: %s\n", path, strerror(errno));
-                return 1;
-            }
+        int next = 0;
+        if (!code && next < npos)
+            path = positionals[next++];
+        if (mode == EXPORT && !output && next < npos)
+            output = positionals[next++];
+        while (next < npos)
+            program_args[nprogram++] = (char *)positionals[next++];
+        for (int i = 0; i < nrest; i++)
+            program_args[nprogram++] = rest[i];
+        if (!path && !code) {
+            usage(stderr);
+            return 2;
         }
-    }
-    const char *output = NULL;
-    if (mode == EXPORT) {
-        if (argi >= argc) {
+        if (mode == EXPORT && !output) {
             fputs("flywheel-lite: export needs an output file\n", stderr);
             return 2;
         }
-        output = argv[argi++];
     }
-    if (argi < argc && !strcmp(argv[argi], "--"))
-        argi++;
-    vm_init(vm, argc - argi, argv + argi);
+
+    char *source = NULL;
+    size_t len = 0;
+    if (code) {
+        path = "<source>";
+        source = xstrdup(code);
+        len = strlen(code);
+    } else if (!strcmp(path, "-")) {
+        source = read_all(stdin, &len);
+        path = "<stdin>";
+    } else {
+        source = read_path(path, &len);
+        if (!source) {
+            fprintf(stderr, "flywheel-lite: cannot read %s: %s\n", path, strerror(errno));
+            return 1;
+        }
+    }
+    vm_init(vm, nprogram, program_args);
     vm->exe_dir = exe_dir;
     if (mode == CHECK || mode == DISASM)
         return compile_only(vm, path, source, len, mode == DISASM);
@@ -507,7 +815,7 @@ int main(int argc, char **argv) {
         fflush(stdout);
         return 0;
     }
-    int code = finish(vm, r, result);
+    int code_ = finish(vm, r, result);
     /* Leave the heap to the OS: freeing every object at exit only costs time. */
-    return code;
+    return code_;
 }

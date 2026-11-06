@@ -5,8 +5,9 @@
    Programs that import modules Flywheel Lite does not provide are reported as skipped.
 2. Flywheel Lite cases: tests/cases/NAME.fw with NAME.out (expected stdout) and optionally
    NAME.err (a substring of stderr) and NAME.code (expected exit status).
+3. Command line: --source, options, export -o, and `flywheel-lite test`.
 
-usage: python3 tests/run_tests.py path/to/flywheel-lite [-v] [-k substring] [--only cases|conformance]
+usage: python3 tests/run_tests.py path/to/flywheel-lite [-v] [-k substring] [--only cases|conformance|cli]
 """
 
 import os
@@ -143,6 +144,58 @@ def main():
                                encoding="utf-8", errors="replace", timeout=60)
             ok = r.returncode == code and r.stdout == expected and (err is None or err in r.stderr)
             check(name, ok, f"exit {r.returncode} (want {code})\n--- expected\n{expected}--- got\n{r.stdout}--- stderr\n{r.stderr}")
+
+    if only in (None, "cli"):
+        # Command-line behaviour shared with the Flywheel compiler: --source anywhere, -o, test.
+        def cli(*args, cwd=None):
+            return subprocess.run([lite, *args], cwd=cwd, capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace", timeout=60)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            argv_code = "import os\nprint os.args()"
+            out = tmp / "out.txt"
+            suite_dir = tmp / "suite"
+            (suite_dir / "nested").mkdir(parents=True)
+            (suite_dir / "build").mkdir()
+            (suite_dir / "test_ok.fw").write_text(
+                "import testing\nfunction setup()\n    print \"setup\"\nend\n"
+                "function test_add() returns void\n    testing.assert_equal(1 + 1, 2)\nend\n"
+                "function helper() returns void\n    testing.fail(\"not a test\")\nend\n", encoding="utf-8")
+            (suite_dir / "nested" / "math_test.fw").write_text(
+                "import testing\nfunction test_bad() returns void\n    testing.assert_equal(2 * 2, 5, \"product\")\nend\n"
+                "function test_good() returns void\n    testing.assert(true)\nend\n", encoding="utf-8")
+            (suite_dir / "build" / "test_skipped.fw").write_text("throw ValueError(\"ran\")\n", encoding="utf-8")
+            cases = [
+                ("short", ["-s", "print 6 * 7"], 0, "42\n"),
+                ("long", ["--source", "print 6 * 7"], 0, "42\n"),
+                ("equals", ["--source=print 6 * 7"], 0, "42\n"),
+                ("run_after_options", ["run", "-O2", "-g", "--source", "print 1"], 0, "1\n"),
+                ("run_arguments", ["run", "-s", argv_code, "--", "a", "-b"], 0, "[\"a\", \"-b\"]\n"),
+                ("implicit_arguments", ["--source", argv_code, "x"], 0, "[\"x\"]\n"),
+                ("export_o", ["export", "-s", "return [1, 2]", "-o", str(out)], 0, ""),
+                ("check_error", ["check", "-s", "print 1 +"], 1, ""),
+                ("unknown_option", ["run", "--bogus", "x.fw"], 2, ""),
+                ("compiler_only", ["build", "x.fw"], 2, ""),
+                ("test", ["test", str(suite_dir)], 1,
+                 f"{suite_dir / 'nested' / 'math_test.fw'}\n"
+                 "  FAIL test_bad: assertion failed: product: expected 5, got 4\n  ok   test_good\n"
+                 f"{suite_dir / 'test_ok.fw'}\nsetup\n  ok   test_add\n2 test file(s), 1 failed\n"),
+                ("test_file", ["test", str(suite_dir / "test_ok.fw")], 0, None),
+            ]
+            for n, args, code, expected in cases:
+                name = f"cli/{n}"
+                if pattern and pattern not in name:
+                    continue
+                r = cli(*args, cwd=tmp)
+                ok = r.returncode == code and (expected is None or r.stdout.replace("\\", "/") ==
+                                               expected.replace("\\", "/"))
+                if n == "export_o":
+                    ok = ok and out.exists() and out.read_text(encoding="utf-8") == "[1, 2]"
+                if n == "check_error":
+                    ok = ok and r.stderr.startswith("<source>:1:")
+                check(name, ok, f"exit {r.returncode} (want {code})\n--- expected\n{expected}--- got\n"
+                                f"{r.stdout}--- stderr\n{r.stderr}")
 
     known = load_known()
     regressions = 0
