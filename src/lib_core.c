@@ -1371,6 +1371,35 @@ NATIVE(a_all) {
     UNUSED_ARGS;
     return any_all(vm, args, out, false);
 }
+/* `items which condition`: the parser passes the condition as a one-parameter lambda. Arrays,
+ * tuples and sets filter to a new array. */
+NATIVE(a_which) {
+    UNUSED_ARGS;
+    Value src = args[0];
+    if (!IS_OBJ(src) || (OBJ_TYPE(src) != OBJ_ARRAY && OBJ_TYPE(src) != OBJ_TUPLE &&
+                         OBJ_TYPE(src) != OBJ_SET))
+        return vm_throw(vm, "TypeError", "'which' filters an array, tuple, or set");
+    ObjList *l = OBJ_TYPE(src) == OBJ_SET ? map_keys(vm, AS_MAP(src)) : L(src);
+    push_root(vm, val_obj(l));
+    ObjList *r = new_list(vm, OBJ_ARRAY, 0);
+    push_root(vm, val_obj(r));
+    for (int i = 0; i < l->count; i++) {
+        Value v, item = l->items[i];
+        if (!vm_call(vm, args[1], 1, &item, &v)) {
+            pop_root(vm, 2);
+            return false;
+        }
+        if (!IS_BOOL(v)) {
+            pop_root(vm, 2);
+            return vm_throw(vm, "TypeError", "'which' condition must be bool");
+        }
+        if (v.as.b)
+            list_push(vm, r, item);
+    }
+    pop_root(vm, 2);
+    *out = val_obj(r);
+    return true;
+}
 NATIVE(a_each) {
     UNUSED_ARGS;
     ObjList *l = L(args[0]);
@@ -2091,6 +2120,7 @@ void lib_core_init(VM *vm) {
         reg(vm, t, "freeze", a_freeze, 0, 0);
         reg(vm, t, "is_frozen", a_is_frozen, 0, 0);
     }
+    reg(vm, TM_ANY, "$which", a_which, 1, 1);
     reg(vm, TM_ARRAY, "push", a_push, 1, -1);
     reg(vm, TM_ARRAY, "append", a_push, 1, -1);
     reg(vm, TM_ARRAY, "pop", a_pop, 0, 0);

@@ -1,0 +1,37 @@
+class Person
+    string name
+    int age
+    bool admin = false
+    function shout() returns string
+        return inst name.upper()
+    end
+end
+
+var people = [Person("Danny", 15), Person("Alice", 30, true), Person("Bob", 18)]
+var adults = people which .age >= 18
+print adults.length
+for p in adults do
+    print p.name
+end
+for p in people which .name == "Danny" do
+    print p.age
+end
+var numbers = [4, 12, 7, 30, 11]
+print numbers which > 10
+print numbers which > 5 and < 12
+print numbers which > 5 which < 12
+var limit = 10
+print numbers which >= limit
+var big = numbers which > 10
+print big.length
+print numbers which % 2 == 0
+print people which .admin
+var plain = people which not .admin
+print plain.length
+var bob = people which .shout() == "BOB"
+print bob[0].name
+print [1, 2, 3] which in [2, 3, 4]
+var s = {3, 1, 4, 1, 5}
+print s which > 2
+print ["a", "bb", "ccc"] which .length > 1
+print numbers which > 100

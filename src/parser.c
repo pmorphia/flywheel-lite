@@ -134,7 +134,7 @@ static const char *reserved_words[] = {
     "then", "else", "while", "do", "for", "in", "end", "break", "continue", "try", "catch",
     "finally", "throw", "inst", "attr", "true", "false", "null", "public", "private", "void",
     "weak", "and", "or", "not", "enum", "interface", "extends", "implements", "match", "case",
-    "super", "is", "elements", "defer", NULL};
+    "super", "is", "elements", "defer", "which", NULL};
 static bool in_list(const Token *t, const char **list) {
     for (int i = 0; list[i]; i++)
         if (tis(t, list[i]))
@@ -179,11 +179,12 @@ static bool speculate(Parser *P, SpecFn fn, void *ctx) {
     jmp_buf jb;
     jmp_buf *saved = P->jmp;
     int pos = P->pos;
-    int nbody = P->nbody;
+    int nbody = P->nbody, which_depth = P->which_depth;
     if (setjmp(jb)) {
         P->jmp = saved;
         P->pos = pos;
         P->nbody = nbody;
+        P->which_depth = which_depth;
         return false;
     }
     P->jmp = &jb;
@@ -745,6 +746,16 @@ static Node *prefix(Parser *P) {
     } else if (t->kind == T_STRING) {
         take(P);
         e = string_expr(P, t->text, (size_t)t->len, t->line, t->col);
+    } else if (P->which_depth > 0 && t->kind == T_OP && tis(t, ".") && peek(P, 1)->kind == T_ID) {
+        /* `.name` inside a `which` condition reads a member of the item being tested. */
+        e = tnode(P, N_NAME, "$which", t);
+    } else if (P->which_depth > 0 &&
+               ((t->kind == T_OP && (tis(t, "==") || tis(t, "!=") || tis(t, "<") || tis(t, ">") ||
+                                     tis(t, "<=") || tis(t, ">=") || tis(t, "*") || tis(t, "/") ||
+                                     tis(t, "//") || tis(t, "%"))) ||
+                (t->kind == T_ID && (tis(t, "in") || tis(t, "is"))))) {
+        /* A condition that starts with an operator compares the item: `which > 10`. */
+        return tnode(P, N_NAME, "$which", t);
     } else if (t->kind == T_INT || t->kind == T_REAL) {
         take(P);
         e = tnode(P, t->kind == T_INT ? N_INT : N_REAL, tstr(P, t), t);
@@ -809,7 +820,7 @@ static Node *prefix(Parser *P) {
             "function", "class", "component", "import", "public", "private", "returns", "return",
             "if", "then", "else", "while", "do", "for", "in", "end", "break", "continue", "try",
             "catch", "finally", "throw", "as", "void", "weak", "and", "or", "enum", "interface",
-            "extends", "implements", "match", "case", "is", NULL};
+            "extends", "implements", "match", "case", "is", "which", NULL};
         if (in_list(t, structural)) {
             char nm[64];
             snprintf(nm, sizeof nm, "%.*s", t->len, t->text);
@@ -852,8 +863,45 @@ static Node *prefix(Parser *P) {
     return e;
 }
 
+static Node *operators(Parser *P, Node *e, int level);
+/* `items which condition` keeps the items for which the condition holds. It binds looser than
+ * every other operator and chains left to right: `xs which > 1 which < 9`. It compiles to the
+ * hidden builtin method `$which` called with a one-parameter lambda. */
+static Node *which(Parser *P, Node *seq) {
+    Token *t = take(P);
+    Token *at = peek(P, 0);
+    if (at->kind == T_NL || at->kind == T_EOF || tis(at, "which"))
+        pfail_at(P, at->line, at->col,
+                 "'which' expects a condition, such as 'which .age >= 18' or 'which > 10'%s", "");
+    FuncDecl *f = arena_alloc(P->arena, sizeof(FuncDecl));
+    f->line = t->line;
+    f->name = "lambda";
+    f->params = arena_alloc(P->arena, sizeof(Param));
+    memset(f->params, 0, sizeof(Param));
+    f->params[0].line = t->line;
+    f->params[0].name = "$which";
+    f->nparams = 1;
+    Node *r = tnode(P, S_RETURN, NULL, at);
+    P->which_depth++;
+    r->expr = operators(P, prefix(P), 0);
+    P->which_depth--;
+    nl_push(P->arena, &f->body, r);
+    Node *fn = tnode(P, N_LAMBDA, "", t);
+    fn->fn = f;
+    Node *m = tnode(P, N_MEMBER, "$which", t);
+    nl_push(P->arena, &m->args, seq);
+    Node *call = tnode(P, N_CALL, "", t);
+    nl_push(P->arena, &call->args, m);
+    nl_push(P->arena, &call->args, fn);
+    return call;
+}
 static Node *expression(Parser *P, int level) {
-    Node *e = prefix(P);
+    Node *e = operators(P, prefix(P), level);
+    while (level == 0 && peek(P, 0)->kind == T_ID && tis(peek(P, 0), "which"))
+        e = which(P, e);
+    return e;
+}
+static Node *operators(Parser *P, Node *e, int level) {
     for (;;) {
         Token *op = peek(P, 0);
         if (!((op->kind == T_OP || op->kind == T_ID) && precedence(op) > level))

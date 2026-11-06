@@ -175,6 +175,7 @@ typedef struct {
     int *body_depths;
     int nbody, capbody;
     int temporaries;
+    int which_depth; /* inside a `which` condition: `.name` and a leading operator use the item */
     NodeList pending;
     jmp_buf *jmp;
     CompileError *err;
