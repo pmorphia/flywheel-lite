@@ -5,8 +5,8 @@ not a new language: it reads the same source as the Flywheel compiler and aims t
 output. Where the compiler builds a native executable through LLVM, Flywheel Lite compiles a file to
 bytecode in memory and runs it straight away.
 
-Flywheel Lite is currently in its **beta** phase: version **2.1 (beta-1)**, following Flywheel
-2.11 (`flywheel-lite --version`).
+Flywheel Lite is currently in its **beta** phase: version **2.2 (beta-2)**, following Flywheel
+2.12 (`flywheel-lite --version`).
 
 Why it exists:
 
@@ -49,7 +49,7 @@ Elsewhere, point at the Flywheel checkout with `make FLYWHEEL_DIR=/path/to/flywh
 through to `make test`), `cmake -DFLYWHEEL_DIR=/path/to/flywheel`, or the `FLYWHEEL_DIR`
 environment variable for `tests/run_tests.py`.
 
-The library modules written in Flywheel (`csv`, `url`, `log`, `args`, `bigint`, `decimal`, `random`) are
+The library modules written in Flywheel (`csv`, `url`, `log`, `args`, `bigint`, `decimal`, `random`, `metric`, `imperial`, and `_time`, the time units behind `import time`) are
 embedded into the executable from `$FLYWHEEL_DIR/stdlib/fw` at build time by a small helper (`tools/embed.c`),
 so the installed binary is self-contained. `make debug` builds with AddressSanitizer and UBSan.
 
@@ -92,8 +92,10 @@ protocol, enums and enums with data, `match` with every pattern form (values, ra
 members, types, `ok`/`error`, destructuring, guards), destructuring declarations, generics,
 nullable values, `try`/`catch`/`finally`/`then`, named errors, declared error types (`error Name(...)`,
 `throw Name with "message"`), `assert`, `defer`, `Result`, reactive variables (`reactive`, `when`,
-`computed`), negated bool aliases (`bool on/off`), units (`unitns`, `unit`, `unitconv`, quantity
-literals such as `100m`, `x in cm`, `type`/`unit`/`unitns`),
+`computed`), negated bool aliases (`bool on/off`), units (`unitns name`, `unit`, `unitconv`, quantity
+literals such as `100m`, quantity types of any numeric type such as `u8[time]` and
+`float[metric.length]`, `x in cm`, `type`/`unit`/`unitns`, units shared across modules, and the
+`metric`, `imperial`, and `time` unit libraries),
 arrays/tuples/maps/sets with their methods, `freeze`, casts and conversions, markup literals,
 components, element families, and local, path, package (`.flywheel-modules`) and library-module
 imports with aliases, wildcards and `private`.
