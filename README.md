@@ -94,8 +94,8 @@ nullable values, `try`/`catch`/`finally`/`then`, named errors, declared error ty
 `throw Name with "message"`), `assert`, `defer`, `Result`, reactive variables (`reactive`, `when`,
 `computed`), negated bool aliases (`bool on/off`), units (`unitns name`, `unit`, `unitconv`, quantity
 literals such as `100m`, quantity types of any numeric type such as `u8[time]` and
-`float[metric.length]`, `x in cm`, `type`/`unit`/`unitns`, units shared across modules, and the
-`metric`, `imperial`, and `time` unit libraries),
+`float[metric.length]`, `x in cm`, `type`/`unit`/`unitns`, units shared across modules, `unitconv A = B`
+between namespaces (`1m + 1ft`), and the `metric`, `imperial`, and `time` unit libraries),
 arrays/tuples/maps/sets with their methods, `freeze`, casts and conversions, markup literals,
 components, element families, and local, path, package (`.flywheel-modules`) and library-module
 imports with aliases, wildcards and `private`.

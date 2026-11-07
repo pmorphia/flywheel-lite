@@ -1145,10 +1145,10 @@ static void compile_expr(Compiler *C, Node *e) {
         }
         const char *unit = !strcmp(op, "in") ? conversion_unit(C, e->args.items[1]) : NULL;
         if (unit) {
+            /* __fwu_in converts within the namespace, or across a `unitconv A = B` (vm.c) */
             Node *call = synth(C, N_CALL, "", e);
-            Node *method = synth(C, N_MEMBER, "__fwu_to_named", e);
-            nl_push(C->arena, &method->args, e->args.items[0]);
-            nl_push(C->arena, &call->args, method);
+            nl_push(C->arena, &call->args, synth(C, N_NAME, "__fwu_in", e));
+            nl_push(C->arena, &call->args, e->args.items[0]);
             nl_push(C->arena, &call->args, synth(C, N_STRING, unit, e));
             compile_call(C, call);
             break;
@@ -2304,8 +2304,20 @@ static bool lower_module_units(Compiler *C) {
             bool own = false;
             for (int o = 0; o < p->nunitns; o++)
                 own = own || !strcmp(p->unitns[o].name, exports[e].name);
-            if (own)
+            char key[256], qual[160];
+            unit_key(key, sizeof key, m->name->chars, exports[e].name);
+            snprintf(qual, sizeof qual, "%s.", C->unit_module_names[i]);
+            if (own) {
+                /* hidden by the module's own namespace; reached only qualified (metric.length) */
+                UnitNs ns = exports[e];
+                ns.module = C->unit_module_names[i];
+                ns.ref = "$";
+                ns.shadowed = true;
+                ns.key = arena_strndup(C->arena, key, strlen(key));
+                ns.qual = arena_strndup(C->arena, qual, strlen(qual));
+                unique[nunique++] = ns;
                 continue;
+            }
             int sources = 0;
             const char *first = NULL;
             for (int j = 0; j < C->nunit_modules; j++) {
@@ -2324,6 +2336,8 @@ static bool lower_module_units(Compiler *C) {
             }
             UnitNs ns = exports[e];
             ns.module = C->unit_module_names[i];
+            ns.key = arena_strndup(C->arena, key, strlen(key));
+            ns.qual = arena_strndup(C->arena, qual, strlen(qual));
             char prefix[32] = "";
             if (sources > 1) {
                 snprintf(prefix, sizeof prefix, "$u%d$", nvisible);
@@ -2363,9 +2377,13 @@ static bool lower_module_units(Compiler *C) {
                 add_wild(C, w);
             }
             visible[nvisible++] = ns;
-            if (sources == 1)
-                unique[nunique++] = ns;
+            unique[nunique++] = ns; /* ambiguous ones carry their "$uK$" ref: qualified only */
         }
+    }
+    for (int i = 0; i < p->nunitns; i++) {
+        char key[256];
+        unit_key(key, sizeof key, C->module->name->chars, p->unitns[i].name);
+        p->unitns[i].key = arena_strndup(C->arena, key, strlen(key));
     }
     if (!lower_program_units(C->arena, p, unique, nunique, C->err))
         return false;

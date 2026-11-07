@@ -556,6 +556,7 @@ static bool quantity_info(VM *vm, Value v, const char *method, const char *what,
 }
 NATIVE(n_unit) { return quantity_info(vm, args[0], "__fwu_unit_name", "unit", out); }
 NATIVE(n_unitns) { return quantity_info(vm, args[0], "__fwu_ns", "unitns", out); }
+NATIVE(n_quantity_in) { return vm_quantity_in(vm, args[0], args[1], out); }
 
 NATIVE(n_error_ctor) {
     ObjString *type = AS_STRING(vm->desc_args[0]);
@@ -2113,6 +2114,8 @@ void lib_core_init(VM *vm) {
     for (size_t i = 0; i < sizeof introspection / sizeof introspection[0]; i++)
         table_set(vm, &vm->builtins, str_intern_c(vm, introspection[i].name),
                   val_obj(new_native(vm, introspection[i].name, introspection[i].fn, 1, 1)));
+    table_set(vm, &vm->builtins, str_intern_c(vm, "__fwu_in"),
+              val_obj(new_native(vm, "__fwu_in", n_quantity_in, 2, 2)));
     ObjModule *result = new_module(vm, str_intern_c(vm, "Result"));
     result->native = true;
     module_set_native(vm, result, "ok", n_result_ok, 0, 1);

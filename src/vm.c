@@ -1,6 +1,7 @@
 /* The bytecode interpreter: dispatch loop, calls, errors, members, classes, and modules. */
 #include "opcodes.h"
 #include "lite.h"
+#include "front.h"
 #include <math.h>
 
 #ifdef _WIN32
@@ -451,6 +452,86 @@ static bool quantity_real(VM *vm, Value v, const char *op, Value *out) {
 static bool same_namespace(Value a, Value b) {
     return AS_INSTANCE(a)->klass->module == AS_INSTANCE(b)->klass->module;
 }
+static void quantity_key(Value v, const char *ns, char *out, size_t n) {
+    ObjModule *m = AS_INSTANCE(v)->klass->module;
+    unit_key(out, n, m ? m->name->chars : "", ns);
+}
+/* `from` in the namespace and unit of `like`, when a `unitconv A = B` relates their namespaces
+ * (the methods live on the namespace that declared it); *found is false when none does. */
+static bool quantity_across(VM *vm, Value from, Value like, Value *out, bool *found) {
+    QuantityKind qf, ql;
+    *found = false;
+    if (!quantity_of(from, &qf) || !quantity_of(like, &ql))
+        return true;
+    char kf[256], kl[256], as[300], fromm[300];
+    quantity_key(from, qf.ns, kf, sizeof kf);
+    quantity_key(like, ql.ns, kl, sizeof kl);
+    snprintf(as, sizeof as, "__fwu_as__%s", kl);
+    snprintf(fromm, sizeof fromm, "__fwu_from__%s", kf);
+    Value x, y;
+    if (!quantity_real(vm, from, "in", &x))
+        return false;
+    push_root(vm, x);
+    bool ok = quantity_real(vm, like, "in", &y);
+    push_root(vm, y);
+    if (ok && !IS_NULL(vm_find_method(AS_INSTANCE(x)->klass, str_intern_c(vm, as)))) {
+        *found = true;
+        ok = quantity_call(vm, x, as, 1, &y, out);
+    } else if (ok && !IS_NULL(vm_find_method(AS_INSTANCE(y)->klass, str_intern_c(vm, fromm)))) {
+        *found = true;
+        ok = quantity_call(vm, y, fromm, 1, &x, out);
+    }
+    pop_root(vm, 2);
+    return ok;
+}
+/* the index of `unit` in the names table of quantity class `klass`'s namespace, or -1 */
+static int quantity_unit_index(VM *vm, ObjModule *m, const char *ns, ObjString *unit) {
+    char table[200];
+    snprintf(table, sizeof table, "__fwu_%s__names", ns);
+    int slot = m ? module_find(m, str_intern_c(vm, table)) : -1;
+    if (slot < 0 || !IS_LIST(m->values.items[slot]))
+        return -1;
+    ObjList *names = AS_LIST(m->values.items[slot]);
+    for (int i = 0; i < names->count; i++)
+        if (IS_STRING(names->items[i]) && AS_STRING(names->items[i]) == unit)
+            return i;
+    return -1;
+}
+bool vm_quantity_in(VM *vm, Value x, Value unit, Value *out) {
+    QuantityKind q;
+    if (!quantity_of(x, &q) || !IS_STRING(unit))
+        return vm_throw(vm, "TypeError", "`in` converts a quantity to a unit");
+    ObjString *u = AS_STRING(unit);
+    ObjModule *own = AS_INSTANCE(x)->klass->module;
+    if (quantity_unit_index(vm, own, q.ns, u) < 0) {
+        /* a unit of another namespace: through a `unitconv A = B` with x's */
+        for (int i = 0; i < vm->module_list.count; i++) {
+            if (!IS_OBJT(vm->module_list.items[i], OBJ_MODULE))
+                continue;
+            ObjModule *m = AS_MODULE(vm->module_list.items[i]);
+            UnitNs *exports = m->unit_exports;
+            for (int e = 0; e < m->nunit_exports; e++) {
+                if (m == own && !strcmp(exports[e].name, q.ns))
+                    continue;
+                int j = quantity_unit_index(vm, m, exports[e].name, u);
+                char cls[200];
+                snprintf(cls, sizeof cls, "__fwu_%s__double", exports[e].name);
+                int slot = j < 0 ? -1 : module_find(m, str_intern_c(vm, cls));
+                if (slot < 0)
+                    continue;
+                Value args[2] = {val_double(0.0), val_int(j)}, like;
+                if (!vm_call(vm, m->values.items[slot], 2, args, &like))
+                    return false;
+                push_root(vm, like);
+                bool found, ok = quantity_across(vm, x, like, out, &found);
+                pop_root(vm, 1);
+                if (!ok || found)
+                    return ok;
+            }
+        }
+    }
+    return quantity_call(vm, x, "__fwu_to_named", 1, &unit, out);
+}
 /* op is one of + - * / // % == != < <= > >=; comparisons produce a bool. */
 static bool quantity_binary(VM *vm, const char *op, Value a, Value b, Value *out) {
     QuantityKind qa, qb;
@@ -462,6 +543,21 @@ static bool quantity_binary(VM *vm, const char *op, Value a, Value b, Value *out
     Value x = a, y = b, r;
     if (isa && isb) {
         bool same = !strcmp(qa.ns, qb.ns) && same_namespace(a, b);
+        /* 1m + 1ft: the second value in the first one's unit, through `unitconv A = B` */
+        if (!same && (!strcmp(op, "+") || !strcmp(op, "-") || !strcmp(op, "/") || comparison)) {
+            Value converted;
+            bool found;
+            if (!quantity_across(vm, b, a, &converted, &found))
+                return false;
+            if (found) {
+                push_root(vm, converted);
+                bool ok = quantity_real(vm, a, op, &x);
+                push_root(vm, x);
+                ok = ok && quantity_binary(vm, op, x, converted, out);
+                pop_root(vm, 2);
+                return ok;
+            }
+        }
         if (same && (!strcmp(op, "+") || !strcmp(op, "-") || !strcmp(op, "/") || comparison)) {
             if (qa.real != qb.real) {
                 if (!quantity_real(vm, a, op, &x))

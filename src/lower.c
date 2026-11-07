@@ -199,12 +199,31 @@ typedef struct {
     UnitNs *items;
     int count, own;
 } UnitSet;
+/* By bare name (own namespaces first, then imported ones reached bare), or qualified as
+ * metric.length (imported, by the module's alias). */
 static int find_ns(UnitSet *s, const char *name) {
-    for (int i = 0; i < s->count; i++)
-        if (!strcmp(s->items[i].name, name))
+    const char *dot = strchr(name, '.');
+    for (int i = 0; i < s->count; i++) {
+        UnitNs *ns = &s->items[i];
+        if (dot) {
+            size_t q = ns->qual ? strlen(ns->qual) : 0;
+            if (i >= s->own && q && !strncmp(name, ns->qual, q) && !strcmp(name + q, ns->name))
+                return i;
+        } else if (!strcmp(ns->name, name) && (i < s->own || (!ns->shadowed && (!ns->ref || !ns->ref[0]))))
             return i;
+    }
     return -1;
 }
+void unit_key(char *out, size_t cap, const char *module, const char *ns) {
+    snprintf(out, cap, "%s__%s", module ? module : "", ns);
+    for (char *p = out; *p; p++)
+        if (!isalnum((unsigned char)*p) && *p != '_')
+            *p = '_';
+}
+typedef struct {
+    int own, other;
+    double k; /* other's base = own's base * k */
+} Equivalence;
 static int unit_index(UnitNs *ns, const char *unit) {
     for (int i = 0; i < ns->nunits; i++)
         if (!strcmp(ns->units[i], unit))
@@ -232,8 +251,7 @@ static void generate_units(Parser *P, Program *p, const UnitNs *imported, int ni
         set.items[set.count++] = p->unitns[n];
     set.own = set.count;
     for (int n = 0; n < nimported; n++)
-        if (find_ns(&set, imported[n].name) < 0)
-            set.items[set.count++] = imported[n];
+        set.items[set.count++] = imported[n];
     Ratio **factors = arena_alloc(P->arena, sizeof(Ratio *) * (size_t)set.count);
     for (int n = 0; n < set.count; n++) {
         UnitNs *ns = &set.items[n];
@@ -244,10 +262,55 @@ static void generate_units(Parser *P, Program *p, const UnitNs *imported, int ni
         for (int i = 0; i < ns->nunits; i++)
             factors[n][i] = unit_factor(P, ns->factors[i], ns->unit_lines[i]);
     }
+    Equivalence *eq = arena_alloc(P->arena, sizeof(Equivalence) * (size_t)(p->nunitconvs + 1));
+    int neq = 0;
+    for (int ci = 0; ci < p->nunitconvs; ci++) {
+        UnitConv *c = &p->unitconvs[ci];
+        if (strcmp(c->op, "="))
+            continue;
+        int index[2];
+        bool known = true;
+        for (int k = 0; k < 2; k++) {
+            index[k] = find_ns(&set, c->namespaces[k]);
+            known = known && index[k] >= 0;
+        }
+        if (!known && !strict)
+            continue;
+        for (int k = 0; k < 2; k++)
+            if (index[k] < 0)
+                parser_fail(P, c->line, c->col,
+                            "unknown unit namespace '%s'; declare it with unitns or import a module that declares it",
+                            c->namespaces[k]);
+        if (index[0] >= set.own && index[1] >= set.own)
+            parser_fail(P, c->line, c->col,
+                        "unitconv relates namespaces of other modules; relate them in a module that declares one of "
+                        "them%s", "");
+        if (index[0] == index[1])
+            parser_fail(P, c->line, c->col, "unitconv = relates two different namespaces%s", "");
+        double base[2];
+        for (int k = 0; k < 2; k++) {
+            UnitNs *ns = &set.items[index[k]];
+            int u = unit_index(ns, c->units[k]);
+            if (u < 0)
+                parser_fail(P, c->line, c->col, "unit namespace '%s' has no unit '%s'", ns->name, c->units[k]);
+            double amount = strtod(c->amounts[k], NULL);
+            if (!(amount > 0))
+                parser_fail(P, c->line, c->col, "unitconv amounts must be positive%s", "");
+            base[k] = amount * factors[index[k]][u].value;
+        }
+        int a = index[0] < set.own ? 0 : 1, b = 1 - a;
+        for (int e = 0; e < neq; e++)
+            if ((eq[e].own == index[a] && eq[e].other == index[b]) || (eq[e].own == index[b] && eq[e].other == index[a]))
+                parser_fail(P, c->line, c->col, "unitconv already relates %s and %s", c->namespaces[0],
+                            c->namespaces[1]);
+        eq[neq++] = (Equivalence){index[a], index[b], base[b] / base[a]};
+    }
     Relation *rel = arena_alloc(P->arena, sizeof(Relation) * (size_t)(p->nunitconvs * 4 + 1));
     int nrel = 0;
     for (int ci = 0; ci < p->nunitconvs; ci++) {
         UnitConv *c = &p->unitconvs[ci];
+        if (!strcmp(c->op, "="))
+            continue;
         double base[3];
         int units[3];
         int index[3];
@@ -456,6 +519,25 @@ static void generate_units(Parser *P, Program *p, const UnitNs *imported, int ni
                            "        return %s(inst __fwu_real(j), j)\n"
                            "    end\n",
                            C, N, at_other, C, C, C, C, C, C);
+                /* equivalences: this value in another namespace's unit (o's), and o in this one's */
+                for (int e = 0; e < neq; e++) {
+                    if (eq[e].own != n)
+                        continue;
+                    UnitNs *o = &set.items[eq[e].other];
+                    const char *ref = eq[e].other < set.own || !o->ref || !o->ref[0] ? "" : o->qual;
+                    char k1[64];
+                    real_text(eq[e].k, k1, sizeof k1);
+                    buf_printf(out,
+                               "    function __fwu_as__%s(%s__fwu_%s__double o) returns %s__fwu_%s__double\n"
+                               "        return %s__fwu_%s__double(inst __fwu_base() * %s / %s__fwu_%s__factor[o.__fwu_unit], "
+                               "o.__fwu_unit)\n"
+                               "    end\n"
+                               "    function __fwu_from__%s(%s__fwu_%s__double o) returns %s\n"
+                               "        return %s(o.__fwu_base() / %s / __fwu_%s__factor[inst __fwu_unit], inst __fwu_unit)\n"
+                               "    end\n",
+                               o->key, ref, o->name, ref, o->name, ref, o->name, k1, ref, o->name, o->key, ref, o->name,
+                               C, C, k1, N);
+                }
                 for (int r = 0; r < nrel; r++) {
                     if (strcmp(rel[r].left, N))
                         continue;

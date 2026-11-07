@@ -158,11 +158,16 @@ typedef struct {
     const char *name;
     int line, col;
     const char *ref, *module;
+    /* unit_key() of the namespace, for equivalence methods (__fwu_as__<key>); `qual` is
+     * "metric." for an imported namespace; `shadowed` when the module declares the same name */
+    const char *key, *qual;
+    bool shadowed;
     const char **units, **factors;
     int *unit_lines;
     int nunits, capunits;
 } UnitNs;
-/* `unitconv 1metric_length.m / 1time.s = 1metric_speed.mps` */
+/* `unitconv 1metric_length.m / 1time.s = 1metric_speed.mps`, or op "=" for
+ * `unitconv 1length.ft = 0.3048metric.length.m` (two namespaces measuring the same thing) */
 typedef struct {
     int line, col;
     const char *op;

@@ -2035,12 +2035,33 @@ static bool parse_program_with(Arena *arena, const char *src, size_t len, Progra
                     pfail_at(&P, first->line, first->col, "unitconv names units with their namespace, such as 1time.s%s", "");
                 c.namespaces[k] = tstr(&P, first);
                 c.units[k] = tstr(&P, identifier(&P));
+                if (ptext(&P, 0, ".") && peek(&P, 1)->kind == T_ID) {
+                    /* 0.3048metric.length.m: a namespace of an imported module */
+                    take(&P);
+                    size_t a = strlen(c.namespaces[k]), b = strlen(c.units[k]);
+                    char *q = arena_alloc(arena, a + b + 2);
+                    memcpy(q, c.namespaces[k], a);
+                    q[a] = '.';
+                    memcpy(q + a + 1, c.units[k], b + 1);
+                    c.namespaces[k] = q;
+                    c.units[k] = tstr(&P, identifier(&P));
+                }
                 if (k == 0) {
-                    if (!ptext(&P, 0, "*") && !ptext(&P, 0, "/"))
-                        pfail(&P, "unitconv expects * or / between the first two quantities%s", "");
-                    c.op = tstr(&P, take(&P));
-                } else if (k == 1)
+                    if (ptext(&P, 0, "=")) {
+                        /* unitconv 1length.ft = 0.3048metric.length.m */
+                        take(&P);
+                        c.op = "=";
+                    } else {
+                        if (!ptext(&P, 0, "*") && !ptext(&P, 0, "/"))
+                            pfail(&P, "unitconv expects * or /, or = to relate two namespaces that measure the same "
+                                      "thing%s", "");
+                        c.op = tstr(&P, take(&P));
+                    }
+                } else if (k == 1) {
+                    if (!strcmp(c.op, "="))
+                        break;
                     expect(&P, "=");
+                }
             }
             finish(&P);
             GROWV(arena, out->unitconvs, out->nunitconvs, out->capunitconvs, UnitConv);
