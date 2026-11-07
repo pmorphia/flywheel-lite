@@ -46,7 +46,7 @@ Elsewhere, point at the Flywheel checkout with `make FLYWHEEL_DIR=/path/to/flywh
 through to `make test`), `cmake -DFLYWHEEL_DIR=/path/to/flywheel`, or the `FLYWHEEL_DIR`
 environment variable for `tests/run_tests.py`.
 
-The library modules written in Flywheel (`csv`, `url`, `log`, `args`, `bigint`, `decimal`) are
+The library modules written in Flywheel (`csv`, `url`, `log`, `args`, `bigint`, `decimal`, `random`) are
 embedded into the executable from `$FLYWHEEL_DIR/stdlib/fw` at build time by a small helper (`tools/embed.c`),
 so the installed binary is self-contained. `make debug` builds with AddressSanitizer and UBSan.
 
