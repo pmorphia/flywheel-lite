@@ -1,5 +1,5 @@
 # Units declared in a library module are used inside it; callers get strings and numbers.
-unitns distance for int, float
+unitns distance
 unit distance.m = 1
 unit distance.km = 1000
 

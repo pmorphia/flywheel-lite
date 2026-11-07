@@ -2,7 +2,7 @@ import "lib/physics.fw"
 import time
 
 # A unit namespace may share its name with an imported module.
-unitns time for int, float
+unitns time
 unit time.s = 1
 unit time.min = 60
 unit time.ms = 1/1000

@@ -4,7 +4,7 @@
 #   cmake --build build --config Release
 #   ctest --test-dir build -C Release --output-on-failure
 cmake_minimum_required(VERSION 3.16)
-project(flywheel-lite VERSION 2.1 LANGUAGES C)
+project(flywheel-lite VERSION 2.2 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -18,7 +18,7 @@ endif()
 set(FLYWHEEL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.." CACHE PATH "Flywheel checkout")
 set(LITE_STDLIB_DIR "${FLYWHEEL_DIR}/stdlib/fw" CACHE PATH
     "Directory holding the Flywheel library modules embedded into flywheel-lite")
-set(LITE_LIBRARY_MODULES csv url log args bigint decimal random)
+set(LITE_LIBRARY_MODULES csv url log args bigint decimal random metric imperial _time)
 
 # The library modules written in Flywheel are compiled into the executable as text.
 add_executable(lite_embed tools/embed.c)

@@ -151,12 +151,13 @@ typedef struct {
     int line;
 } ComponentDecl;
 
-/* `unitns time for int, float` with its `unit time.s = 1` declarations (see lower.c). */
+/* `unitns time` with its `unit time.s = 1` declarations (see lower.c). Units apply to every
+ * numeric type. For a namespace of an imported module (compiler.c), `ref` prefixes its hidden
+ * names as this module sees them ("" when the bare names resolve) and `module` is the import. */
 typedef struct {
     const char *name;
     int line, col;
-    bool integer, real;
-    const char *real_spelling;
+    const char *ref, *module;
     const char **units, **factors;
     int *unit_lines;
     int nunits, capunits;
@@ -209,10 +210,14 @@ typedef struct {
 void nl_push(Arena *a, NodeList *l, Node *n);
 void nl_insert(Arena *a, NodeList *l, int at, Node *n);
 bool parse_program(Arena *arena, const char *src, size_t len, Program *out, CompileError *err);
+/* Parses without lowering units; the compiler lowers them once imports are known. */
+bool parse_program_deferred(Arena *arena, const char *src, size_t len, Program *out, CompileError *err);
+/* Lowers the program's units, letting unitconv relate the imported namespaces. */
+bool lower_program_units(Arena *arena, Program *prog, const UnitNs *imported, int nimported, CompileError *err);
 TB_NORETURN void parser_fail(Parser *P, int line, int col, const char *fmt, ...);
 /* lower.c: unit namespaces become hidden quantity classes and tables; reactive variables,
  * `when`, `computed`, and negated aliases become ordinary declarations and closures. */
-void lower_units(Parser *P, Program *prog);
+void lower_units(Parser *P, Program *prog, const UnitNs *imported, int nimported, bool strict);
 void lower_reactive(Parser *P, Program *prog);
 
 

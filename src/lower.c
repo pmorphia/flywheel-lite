@@ -194,11 +194,16 @@ typedef struct {
     int line;
 } Relation;
 
-static UnitNs *find_ns(Program *p, const char *name) {
-    for (int i = 0; i < p->nunitns; i++)
-        if (!strcmp(p->unitns[i].name, name))
-            return &p->unitns[i];
-    return NULL;
+/* The module's own namespaces, then the imported ones it does not hide. */
+typedef struct {
+    UnitNs *items;
+    int count, own;
+} UnitSet;
+static int find_ns(UnitSet *s, const char *name) {
+    for (int i = 0; i < s->count; i++)
+        if (!strcmp(s->items[i].name, name))
+            return i;
+    return -1;
 }
 static int unit_index(UnitNs *ns, const char *unit) {
     for (int i = 0; i < ns->nunits; i++)
@@ -219,10 +224,19 @@ static void add_relation(Parser *P, Relation *rel, int *n, Relation r) {
     rel[(*n)++] = r;
 }
 
-static void generate_units(Parser *P, Program *p, Buf *out) {
-    Ratio **factors = arena_alloc(P->arena, sizeof(Ratio *) * (size_t)p->nunitns);
-    for (int n = 0; n < p->nunitns; n++) {
-        UnitNs *ns = &p->unitns[n];
+static void generate_units(Parser *P, Program *p, const UnitNs *imported, int nimported, bool strict, Buf *out) {
+    UnitSet set;
+    set.items = arena_alloc(P->arena, sizeof(UnitNs) * (size_t)(p->nunitns + nimported + 1));
+    set.count = 0;
+    for (int n = 0; n < p->nunitns; n++)
+        set.items[set.count++] = p->unitns[n];
+    set.own = set.count;
+    for (int n = 0; n < nimported; n++)
+        if (find_ns(&set, imported[n].name) < 0)
+            set.items[set.count++] = imported[n];
+    Ratio **factors = arena_alloc(P->arena, sizeof(Ratio *) * (size_t)set.count);
+    for (int n = 0; n < set.count; n++) {
+        UnitNs *ns = &set.items[n];
         if (!ns->nunits)
             parser_fail(P, ns->line, ns->col, "unit namespace '%s' has no units; add one, such as unit %s.base = 1",
                         ns->name, ns->name);
@@ -236,20 +250,38 @@ static void generate_units(Parser *P, Program *p, Buf *out) {
         UnitConv *c = &p->unitconvs[ci];
         double base[3];
         int units[3];
+        int index[3];
+        bool known = true, any_own = false;
         for (int k = 0; k < 3; k++) {
-            UnitNs *ns = find_ns(p, c->namespaces[k]);
-            if (!ns)
-                parser_fail(P, c->line, c->col, "unknown unit namespace '%s'", c->namespaces[k]);
+            index[k] = find_ns(&set, c->namespaces[k]);
+            known = known && index[k] >= 0;
+            any_own = any_own || (index[k] >= 0 && index[k] < set.own);
+        }
+        if (!known && !strict)
+            continue;
+        if (known && !any_own)
+            parser_fail(P, c->line, c->col,
+                        "unitconv relates namespaces of other modules; relate them in a module that declares one of "
+                        "them%s", "");
+        if (known && !strcmp(c->op, "/") && index[0] >= set.own)
+            parser_fail(P, c->line, c->col,
+                        "unitconv divides %s, which another module declares; write the relation as a product, such "
+                        "as unitconv 1%s.%s * 1%s.%s = 1%s.%s",
+                        c->namespaces[0], c->namespaces[2], c->units[2], c->namespaces[1], c->units[1],
+                        c->namespaces[0], c->units[0]);
+        for (int k = 0; k < 3; k++) {
+            if (index[k] < 0)
+                parser_fail(P, c->line, c->col,
+                            "unknown unit namespace '%s'; declare it with unitns or import a module that declares it",
+                            c->namespaces[k]);
+            UnitNs *ns = &set.items[index[k]];
             int u = unit_index(ns, c->units[k]);
             if (u < 0)
                 parser_fail(P, c->line, c->col, "unit namespace '%s' has no unit '%s'", ns->name, c->units[k]);
-            if (!ns->real)
-                parser_fail(P, c->line, c->col, "unitconv computes in floating point; declare unitns %s for int, float",
-                            ns->name);
             double amount = strtod(c->amounts[k], NULL);
             if (!(amount > 0))
                 parser_fail(P, c->line, c->col, "unitconv amounts must be positive%s", "");
-            base[k] = amount * factors[ns - p->unitns][u].value;
+            base[k] = amount * factors[index[k]][u].value;
             units[k] = u;
         }
         bool divide = !strcmp(c->op, "/");
@@ -301,8 +333,6 @@ static void generate_units(Parser *P, Program *p, Buf *out) {
         snprintf(at_other, sizeof at_other, "[inst __fwu_unit * %d + o.__fwu_unit]", count);
         for (int kind = 0; kind < 2; kind++) {
             bool is_int = kind == 0;
-            if ((is_int && !ns->integer) || (!is_int && !ns->real))
-                continue;
             char C[160], D[160];
             snprintf(C, sizeof C, "__fwu_%s__%s", N, is_int ? "int" : "double");
             snprintf(D, sizeof D, "__fwu_%s__double", N);
@@ -341,8 +371,8 @@ static void generate_units(Parser *P, Program *p, Buf *out) {
                        "        end\n"
                        "        return inst __fwu_to(j)\n"
                        "    end\n",
-                       C, T, N, C, C, N, is_int ? "int" : ns->real_spelling, N, number, N, at_self, N, at_self,
-                       number, N, ns->integer && !ns->real ? C : (ns->real ? D : C), N, N);
+                       C, T, N, C, C, N, is_int ? "int" : "float", N, number, N, at_self, N, at_self,
+                       number, N, D, N, N);
             if (is_int) {
                 buf_printf(out,
                            "    function __fwu_exact(int j) returns int\n"
@@ -356,7 +386,7 @@ static void generate_units(Parser *P, Program *p, Buf *out) {
                            "        end\n"
                            "        return inst value * m\n"
                            "    end\n",
-                           N, at_self, N, N, ns->real_spelling, N);
+                           N, at_self, N, N, "float", N);
                 const char *ops[2][2] = {{"add", "+"}, {"sub", "-"}};
                 for (int o = 0; o < 2; o++)
                     buf_printf(out,
@@ -390,21 +420,14 @@ static void generate_units(Parser *P, Program *p, Buf *out) {
                            "        return %s(inst value // k, inst __fwu_unit)\n"
                            "    end\n",
                            C, N, at_other, N, at_self, N, at_o_j, C, C, C, C);
-                if (ns->real)
-                    buf_printf(out,
-                               "    function __fwu_float() returns %s\n"
-                               "        return %s(double(inst value), inst __fwu_unit)\n"
-                               "    end\n"
-                               "    function __fwu_to(int j) returns %s\n"
-                               "        return %s(inst __fwu_real(j), j)\n"
-                               "    end\n",
-                               D, D, D, D);
-                else
-                    buf_printf(out,
-                               "    function __fwu_to(int j) returns %s\n"
-                               "        return %s(inst __fwu_exact(j), j)\n"
-                               "    end\n",
-                               C, C);
+                buf_printf(out,
+                           "    function __fwu_float() returns %s\n"
+                           "        return %s(double(inst value), inst __fwu_unit)\n"
+                           "    end\n"
+                           "    function __fwu_to(int j) returns %s\n"
+                           "        return %s(inst __fwu_real(j), j)\n"
+                           "    end\n",
+                           D, D, D, D);
             } else {
                 const char *ops[2][2] = {{"add", "+"}, {"sub", "-"}};
                 for (int o = 0; o < 2; o++)
@@ -469,15 +492,18 @@ static void generate_units(Parser *P, Program *p, Buf *out) {
     }
 }
 
-void lower_units(Parser *P, Program *p) {
+void lower_units(Parser *P, Program *p, const UnitNs *imported, int nimported, bool strict) {
     if (!p->nunitns) {
-        if (p->nunitconvs)
-            parser_fail(P, p->unitconvs[0].line, p->unitconvs[0].col,
-                        "unitconv needs unit namespaces; declare them with unitns%s", "");
+        if (p->nunitconvs && (strict || !nimported))
+            parser_fail(P, p->unitconvs[0].line, p->unitconvs[0].col, "%s",
+                        nimported ? "unitconv relates namespaces of other modules; relate them in a module that "
+                                    "declares one of them"
+                                  : "unitconv needs unit namespaces; declare them with unitns");
+        p->nunitconvs = 0;
         return;
     }
     Buf text = {0};
-    generate_units(P, p, &text);
+    generate_units(P, p, imported, nimported, strict, &text);
     p->nunitconvs = 0;
     Program gen;
     int line = p->unitns[0].line, col = p->unitns[0].col;

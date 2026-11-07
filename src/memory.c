@@ -744,6 +744,7 @@ static void free_obj(VM *vm, Obj *o) {
         va_free(vm, &m->names_by_slot);
         free(m->is_private);
         free(m->is_component_slot);
+        free_unit_exports(m->unit_exports, m->nunit_exports);
         tb_realloc(vm, o, sizeof(ObjModule), 0);
         return;
     }

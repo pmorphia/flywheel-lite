@@ -30,8 +30,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define LITE_VERSION "2.1 (beta-1)"
-#define LITE_LANGUAGE "2.11"
+#define LITE_VERSION "2.2 (beta-2)"
+#define LITE_LANGUAGE "2.12"
 
 #if defined(__GNUC__) || defined(__clang__)
 #define TB_NORETURN __attribute__((noreturn))
@@ -299,6 +299,9 @@ typedef struct ObjModule {
     bool native, initialized, initializing, html, repl;
     Value init;       /* closure running the module body */
     Value result;
+    /* Unit namespaces the module declares (UnitNs *, front.h), for the modules that import it. */
+    void *unit_exports;
+    int nunit_exports;
 } ObjModule;
 #define AS_MODULE(v) ((struct ObjModule *)AS_OBJ(v))
 
@@ -637,6 +640,7 @@ Value vm_find_method(ObjClass *klass, ObjString *name);
 bool vm_coerce(VM *vm, Value v, ObjTypeDesc *t, Value *out, const char *what);
 /* The unit namespace of a hidden quantity class (__fwu_<ns>__int or __fwu_<ns>__double; lower.c). */
 bool quantity_class_name(const char *name, char *ns, size_t nscap, bool *real);
+void free_unit_exports(void *exports, int count); /* compiler.c */
 bool vm_type_test(VM *vm, Value v, ObjTypeDesc *t);
 bool vm_cast(VM *vm, ObjTypeDesc *t, Value v, Value *out);
 ObjString *error_type_name(VM *vm, Value err);

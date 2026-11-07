@@ -445,8 +445,7 @@ static bool quantity_real(VM *vm, Value v, const char *op, Value *out) {
     if (!quantity_of(v, &q) || q.real)
         return true;
     if (IS_NULL(vm_find_method(AS_INSTANCE(v)->klass, str_intern_c(vm, "__fwu_float"))))
-        return vm_throw(vm, "TypeError", "%s with int[%s] needs floating point; declare unitns %s for int, float",
-                        op, q.ns, q.ns);
+        return vm_throw(vm, "TypeError", "%s with int[%s] needs floating point", op, q.ns);
     return quantity_call(vm, v, "__fwu_float", 0, NULL, out);
 }
 static bool same_namespace(Value a, Value b) {
@@ -506,6 +505,15 @@ static bool quantity_binary(VM *vm, const char *op, Value a, Value b, Value *out
             push_root(vm, x);
             bool ok = quantity_real(vm, b, op, &y);
             push_root(vm, y);
+            /* a * b may be declared on b's namespace, in another module: b * a */
+            char commuted[160];
+            snprintf(commuted, sizeof commuted, "__fwu_mul__%s", qa.ns);
+            if (ok && op[0] == '*' && IS_NULL(vm_find_method(AS_INSTANCE(x)->klass, str_intern_c(vm, method))) &&
+                !IS_NULL(vm_find_method(AS_INSTANCE(y)->klass, str_intern_c(vm, commuted)))) {
+                ok = quantity_call(vm, y, commuted, 1, &x, out);
+                pop_root(vm, 2);
+                return ok;
+            }
             if (ok && IS_NULL(vm_find_method(AS_INSTANCE(x)->klass, str_intern_c(vm, method))))
                 ok = vm_throw(vm, "TypeError",
                               "no unitconv relates %s %s %s; declare one, such as unitconv 1%s.unit %s 1%s.unit = "

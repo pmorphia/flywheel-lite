@@ -80,6 +80,12 @@ typedef struct {
     bool *global_const;
     int line, col;
     const char *unit_hint; /* declared type of the declaration being compiled, for 100m literals */
+    /* modules whose unit namespaces this module sees: its imports, and _time behind `import time` */
+    ObjModule **unit_modules;
+    const char **unit_module_names;
+    int nunit_modules;
+    const char **ambiguous_units; /* "ns\0a and b" pairs, as two strings */
+    int nambiguous_units;
 } Compiler;
 
 TB_NORETURN static void cfail(Compiler *C, int line, const char *fmt, ...) {
@@ -218,6 +224,38 @@ static void resolve_named_type(Compiler *C, ObjTypeDesc *t, const char *n, size_
             t->slot = ws;
             if (dot)
                 t->member = str_intern(C->vm, dot + 1, len - hl - 1);
+        } else if (!strncmp(hs, "__fwu_", 6)) {
+            /* int[ns]: a quantity type whose namespace is not visible here */
+            char ns[160];
+            const char *inner = hs + 6, *split = NULL;
+            for (const char *p = inner; (p = strstr(p, "__")); p++)
+                split = p;
+            const char *kind = split ? split + 2 : "int";
+            snprintf(ns, sizeof ns, "%.*s", split ? (int)(split - inner) : (int)strlen(inner), inner);
+            char spelled[200];
+            snprintf(spelled, sizeof spelled, "%s[%s]", !strcmp(kind, "double") ? "float" : kind, ns);
+            char message[1600];
+            if (strcmp(kind, "int") && strcmp(kind, "double"))
+                snprintf(message, sizeof message,
+                         "units apply only to numbers: %s is not a type; use a numeric type such as int[%s] or "
+                         "float[%s]",
+                         spelled, ns, ns);
+            else {
+                snprintf(message, sizeof message,
+                         "unknown unit namespace '%s' in %s; declare it with unitns %s or import a module that "
+                         "declares it",
+                         ns, spelled, ns);
+                for (int a = 0; a < C->nambiguous_units; a += 2)
+                    if (!strcmp(C->ambiguous_units[a], ns)) {
+                        const char *both = C->ambiguous_units[a + 1];
+                        snprintf(message, sizeof message,
+                                 "unit namespace '%s' is ambiguous: modules %s both declare it; qualify it, such as "
+                                 "float[%.*s.%s]",
+                                 ns, both, (int)strcspn(both, " "), both, ns);
+                    }
+            }
+            free(hs);
+            cfail(C, C->line, "%s", message);
         }
         free(hs);
         return;
@@ -866,7 +904,30 @@ static void compile_quantity(Compiler *C, Node *e) {
         if (!quantity_class_name(base, hint_ns, sizeof hint_ns, &hint_real))
             hint_ns[0] = 0;
     }
-    UnitNs *wanted = hint_ns[0] ? unit_namespace(C, hint_ns) : NULL;
+    /* the declared namespace: by name, preferring the import that qualifies it (metric.length)
+     * and then one that has the unit */
+    UnitNs *wanted = NULL;
+    if (hint_ns[0]) {
+        const char *qual = NULL;
+        char module[96] = "";
+        if (C->unit_hint) {
+            const char *dot = strchr(C->unit_hint, '.');
+            const char *mark = strstr(C->unit_hint, "__fwu_");
+            if (dot && mark && dot < mark) {
+                snprintf(module, sizeof module, "%.*s", (int)(dot - C->unit_hint), C->unit_hint);
+                qual = module;
+            }
+        }
+        for (int i = 0; i < C->prog->nunitns; i++) {
+            UnitNs *c = &C->prog->unitns[i];
+            if (strcmp(c->name, hint_ns))
+                continue;
+            if (qual && (!c->module || strcmp(c->module, qual)))
+                continue;
+            if (!wanted || (unit_slot(wanted, unit) < 0 && unit_slot(c, unit) >= 0))
+                wanted = c;
+        }
+    }
     if (!ns && wanted && unit_slot(wanted, unit) >= 0)
         ns = wanted;
     if (!ns) {
@@ -875,22 +936,35 @@ static void compile_quantity(Compiler *C, Node *e) {
         for (int i = 0; i < C->prog->nunitns; i++)
             if (unit_slot(&C->prog->unitns[i], unit) >= 0 && n < 2)
                 found[n++] = &C->prog->unitns[i];
-        if (!n)
+        if (!n) {
+            /* a loaded module that declares it, to name in the hint */
+            const char *where = NULL;
+            ValueArray *mods = &C->vm->module_list;
+            for (int i = 0; i < mods->count && !where; i++) {
+                if (!IS_OBJT(mods->items[i], OBJ_MODULE))
+                    continue;
+                ObjModule *m = AS_MODULE(mods->items[i]);
+                UnitNs *exports = m->unit_exports;
+                for (int k = 0; k < m->nunit_exports && !where; k++)
+                    if (unit_slot(&exports[k], unit) >= 0)
+                        where = !strcmp(m->name->chars, "_time") ? "time" : m->name->chars;
+            }
+            if (where)
+                cfail(C, e->line, "unknown unit '%s' after %s; import %s, which declares it", unit,
+                      e->args.items[0]->text, where);
             cfail(C, e->line, "unknown unit '%s' after %s%s", unit, e->args.items[0]->text,
-                  C->prog->nunitns ? "" : "; declare units with unitns and unit, such as `unitns length for int, "
-                                          "float` and `unit length.m = 1`");
+                  C->prog->nunitns ? "" : "; declare units with unitns and unit, such as `unitns length` and "
+                                          "`unit length.m = 1`, or import a unit library such as metric");
+        }
         if (n > 1)
             cfail(C, e->line, "unit '%s' is ambiguous: %s and %s both have it; write %s%s.%s", unit, found[0]->name,
                   found[1]->name, e->args.items[0]->text, found[0]->name, unit);
         ns = found[0];
     }
     Node *number = e->args.items[0];
-    bool real = number->kind == N_REAL || !ns->integer || (wanted == ns && hint_real);
-    if (real && !ns->real)
-        cfail(C, e->line, "int[%s] cannot hold %s; declare unitns %s for int, float", ns->name, number->text,
-              ns->name);
-    char cls[160];
-    snprintf(cls, sizeof cls, "__fwu_%s__%s", ns->name, real ? "double" : "int");
+    bool real = number->kind == N_REAL || (wanted == ns && hint_real);
+    char cls[200];
+    snprintf(cls, sizeof cls, "%s__fwu_%s__%s", ns->ref ? ns->ref : "", ns->name, real ? "double" : "int");
     Node *call = synth(C, N_CALL, "", e);
     nl_push(C->arena, &call->args, synth(C, N_NAME, arena_strndup(C->arena, cls, strlen(cls)), e));
     Node *amount = number;
@@ -2111,6 +2185,21 @@ static void process_imports(Compiler *C) {
             cfail(C, im->line, "%s", sub.message[0] ? sub.message : "cannot import module");
         }
         add_alias(C, im->alias, m);
+        ObjModule *units = m;
+        if (native && !strcmp(im->name, "time")) {
+            /* `import time` also brings the time unit namespace (stdlib/fw/_time.fw) */
+            bool unused;
+            units = vm_load_module(C->vm, "_time", C->path, &unused, &sub);
+            if (!units)
+                cfail(C, im->line, "%s", sub.message);
+        }
+        if (!units->native) {
+            C->unit_modules = xrealloc(C->unit_modules, sizeof(ObjModule *) * (size_t)(C->nunit_modules + 1));
+            C->unit_module_names =
+                xrealloc(C->unit_module_names, sizeof(const char *) * (size_t)(C->nunit_modules + 1));
+            C->unit_modules[C->nunit_modules] = units;
+            C->unit_module_names[C->nunit_modules++] = im->alias;
+        }
         if (im->wildcard) {
             if (!strcmp(im->name, "html") || !strcmp(im->name, "svg"))
                 C->module->html = true;
@@ -2146,6 +2235,152 @@ static void process_imports(Compiler *C) {
     }
 }
 
+/* ---------------------------------------------------------------- units across modules */
+
+static const char *unit_hidden[] = {"int", "double", "names", "factor", "finer", "num", "den", "mul"};
+static char *copy_string(const char *s) {
+    return s ? xstrndup(s, strlen(s)) : NULL;
+}
+void free_unit_exports(void *exports, int count) {
+    UnitNs *ns = exports;
+    for (int i = 0; i < count; i++) {
+        free((char *)ns[i].name);
+        for (int u = 0; u < ns[i].nunits; u++) {
+            free((char *)ns[i].units[u]);
+            free((char *)ns[i].factors[u]);
+        }
+        free(ns[i].units);
+        free(ns[i].factors);
+        free(ns[i].unit_lines);
+    }
+    free(exports);
+}
+/* The module's own namespaces, kept for the modules that import it. */
+static void export_units(Compiler *C) {
+    Program *p = C->prog;
+    if (!p->nunitns)
+        return;
+    UnitNs *out = xmalloc(sizeof(UnitNs) * (size_t)p->nunitns);
+    for (int i = 0; i < p->nunitns; i++) {
+        UnitNs *ns = &p->unitns[i];
+        memset(&out[i], 0, sizeof out[i]);
+        out[i].name = copy_string(ns->name);
+        out[i].line = ns->line;
+        out[i].col = ns->col;
+        out[i].nunits = ns->nunits;
+        out[i].units = xmalloc(sizeof(char *) * (size_t)(ns->nunits + 1));
+        out[i].factors = xmalloc(sizeof(char *) * (size_t)(ns->nunits + 1));
+        out[i].unit_lines = xmalloc(sizeof(int) * (size_t)(ns->nunits + 1));
+        for (int u = 0; u < ns->nunits; u++) {
+            out[i].units[u] = copy_string(ns->units[u]);
+            out[i].factors[u] = copy_string(ns->factors[u]);
+            out[i].unit_lines[u] = ns->unit_lines[u];
+        }
+    }
+    free_unit_exports(C->module->unit_exports, C->module->nunit_exports);
+    C->module->unit_exports = out;
+    C->module->nunit_exports = p->nunitns;
+}
+/* Lowers the module's units with the imported namespaces visible, then lists those namespaces with
+ * the module's own so literals (5km) and conversions (x in m) find them. A namespace name that
+ * two imports declare is reached through a "$k$" prefix, and bare types naming it are an error. */
+static bool lower_module_units(Compiler *C) {
+    Program *p = C->prog;
+    int total = 0;
+    for (int i = 0; i < C->nunit_modules; i++)
+        total += C->unit_modules[i]->nunit_exports;
+    UnitNs *visible = arena_alloc(C->arena, sizeof(UnitNs) * (size_t)(total + 1));
+    UnitNs *unique = arena_alloc(C->arena, sizeof(UnitNs) * (size_t)(total + 1));
+    int nvisible = 0, nunique = 0;
+    for (int i = 0; i < C->nunit_modules; i++) {
+        ObjModule *m = C->unit_modules[i];
+        bool seen = false;
+        for (int k = 0; k < i; k++)
+            seen = seen || C->unit_modules[k] == m;
+        if (seen)
+            continue;
+        UnitNs *exports = m->unit_exports;
+        for (int e = 0; e < m->nunit_exports; e++) {
+            bool own = false;
+            for (int o = 0; o < p->nunitns; o++)
+                own = own || !strcmp(p->unitns[o].name, exports[e].name);
+            if (own)
+                continue;
+            int sources = 0;
+            const char *first = NULL;
+            for (int j = 0; j < C->nunit_modules; j++) {
+                bool dup = false;
+                for (int k = 0; k < j; k++)
+                    dup = dup || C->unit_modules[k] == C->unit_modules[j];
+                if (dup)
+                    continue;
+                UnitNs *other = C->unit_modules[j]->unit_exports;
+                for (int f = 0; f < C->unit_modules[j]->nunit_exports; f++)
+                    if (!strcmp(other[f].name, exports[e].name)) {
+                        if (!sources)
+                            first = C->unit_module_names[j];
+                        sources++;
+                    }
+            }
+            UnitNs ns = exports[e];
+            ns.module = C->unit_module_names[i];
+            char prefix[32] = "";
+            if (sources > 1) {
+                snprintf(prefix, sizeof prefix, "$u%d$", nvisible);
+                bool listed = false;
+                for (int a = 0; a < C->nambiguous_units; a += 2)
+                    listed = listed || !strcmp(C->ambiguous_units[a], ns.name);
+                if (!listed) {
+                    char both[256];
+                    snprintf(both, sizeof both, "%s and %s", first, strcmp(first, ns.module) ? ns.module : "another");
+                    for (int j = 0; j < C->nunit_modules; j++)
+                        if (strcmp(C->unit_module_names[j], first)) {
+                            UnitNs *other = C->unit_modules[j]->unit_exports;
+                            for (int f = 0; f < C->unit_modules[j]->nunit_exports; f++)
+                                if (!strcmp(other[f].name, ns.name))
+                                    snprintf(both, sizeof both, "%s and %s", first, C->unit_module_names[j]);
+                        }
+                    C->ambiguous_units = xrealloc(C->ambiguous_units,
+                                                  sizeof(const char *) * (size_t)(C->nambiguous_units + 2));
+                    C->ambiguous_units[C->nambiguous_units++] = ns.name;
+                    C->ambiguous_units[C->nambiguous_units++] = arena_strndup(C->arena, both, strlen(both));
+                }
+            }
+            ns.ref = arena_strndup(C->arena, prefix, strlen(prefix));
+            for (int h = 0; h < 8; h++) {
+                char hidden[200], alias[240];
+                snprintf(hidden, sizeof hidden, "__fwu_%s__%s", ns.name, unit_hidden[h]);
+                snprintf(alias, sizeof alias, "%s%s", prefix, hidden);
+                int slot = module_find(m, str_intern_c(C->vm, hidden));
+                if (slot < 0)
+                    continue;
+                Wild w;
+                memset(&w, 0, sizeof w);
+                w.name = arena_strndup(C->arena, alias, strlen(alias));
+                w.module = m;
+                w.from = m;
+                w.slot = slot;
+                add_wild(C, w);
+            }
+            visible[nvisible++] = ns;
+            if (sources == 1)
+                unique[nunique++] = ns;
+        }
+    }
+    if (!lower_program_units(C->arena, p, unique, nunique, C->err))
+        return false;
+    export_units(C);
+    if (nvisible) {
+        UnitNs *all = arena_alloc(C->arena, sizeof(UnitNs) * (size_t)(p->nunitns + nvisible));
+        if (p->nunitns)
+            memcpy(all, p->unitns, sizeof(UnitNs) * (size_t)p->nunitns);
+        memcpy(all + p->nunitns, visible, sizeof(UnitNs) * (size_t)nvisible);
+        p->unitns = all;
+        p->nunitns += nvisible;
+    }
+    return true;
+}
+
 ObjFunction *compile_module(VM *vm, ObjModule *module, const char *source, size_t len,
                             const char *path, CompileError *err) {
     Compiler *C = xmalloc(sizeof(Compiler));
@@ -2161,12 +2396,14 @@ ObjFunction *compile_module(VM *vm, ObjModule *module, const char *source, size_
     vm->gc_off++;
     ObjFunction *result = NULL;
     FuncState *fs = NULL;
-    if (!parse_program(C->arena, source, len, &prog, err))
+    if (!parse_program_deferred(C->arena, source, len, &prog, err))
         goto done;
     C->prog = &prog;
     if (setjmp(C->jmp))
         goto done;
     process_imports(C);
+    if (!lower_module_units(C))
+        goto done;
     /* Predeclare top-level names so functions can refer to later declarations. */
     for (int i = 0; i < prog.nfunctions; i++)
         declare_global(C, prog.functions[i].name, prog.functions[i].line);
@@ -2229,6 +2466,17 @@ ObjFunction *compile_module(VM *vm, ObjModule *module, const char *source, size_
             continue;
         emit(C, OP_IMPORT);
         emit16(C, make_const(C, val_obj(m)));
+        emit(C, OP_POP);
+    }
+    /* Unit modules imported for their namespaces alone (_time behind `import time`) too. */
+    for (int i = 0; i < C->nunit_modules; i++) {
+        bool aliased = false;
+        for (int k = 0; k < C->naliases; k++)
+            aliased = aliased || C->aliases[k].module == C->unit_modules[i];
+        if (aliased)
+            continue;
+        emit(C, OP_IMPORT);
+        emit16(C, make_const(C, val_obj(C->unit_modules[i])));
         emit(C, OP_POP);
     }
     /* Enums */
@@ -2311,6 +2559,9 @@ done:
     free(fs);
     free(C->wilds);
     free(C->aliases);
+    free(C->unit_modules);
+    free(C->unit_module_names);
+    free(C->ambiguous_units);
     free(C->global_types);
     free(C->global_const);
     arena_free(C->arena);

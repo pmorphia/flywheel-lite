@@ -313,17 +313,42 @@ static void type_into(Parser *P, SBuf *r) {
             expect(P, ">");
             sb_addc(r, '>');
         }
-        /* int[time] / float[time]: a quantity in a unit namespace (its hidden class, lower.c) */
-        if ((tis(t, "int") || tis(t, "float") || tis(t, "double")) && r->n == start + (size_t)t->len &&
-            ptext(P, 0, "[") && peek(P, 1)->kind == T_ID && ptext(P, 2, "]")) {
+        /* int[time], float[time], u8[time], float[metric.length]: a quantity in a unit namespace
+         * (its hidden class, lower.c). Integer types name the integer class and float/double the
+         * floating-point one; other builtin types keep their name so the compiler can say that
+         * units apply only to numbers. */
+        static const char *integers[] = {"int", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", NULL};
+        static const char *others[] = {"string", "bool", "char", "void", "element", "fragment", NULL};
+        bool integer = false, other = false;
+        for (int i = 0; integers[i]; i++)
+            integer = integer || tis(t, integers[i]);
+        for (int i = 0; others[i]; i++)
+            other = other || tis(t, others[i]);
+        bool qualified = ptext(P, 2, ".") && peek(P, 3)->kind == T_ID && ptext(P, 4, "]");
+        if ((integer || other || tis(t, "float") || tis(t, "double")) && r->n == start + (size_t)t->len &&
+            ptext(P, 0, "[") && peek(P, 1)->kind == T_ID && (ptext(P, 2, "]") || qualified)) {
             take(P);
+            Token *module = NULL;
+            if (qualified) {
+                module = identifier(P);
+                take(P);
+            }
             Token *ns = identifier(P);
             take(P);
-            bool integer = tis(t, "int");
             r->n = start;
+            if (module) {
+                sb_add(r, module->text, (size_t)module->len);
+                sb_addc(r, '.');
+            }
             sb_adds(r, "__fwu_");
             sb_add(r, ns->text, (size_t)ns->len);
-            sb_adds(r, integer ? "__int" : "__double");
+            sb_adds(r, "__");
+            if (integer)
+                sb_adds(r, "int");
+            else if (other)
+                sb_add(r, t->text, (size_t)t->len);
+            else
+                sb_adds(r, "double");
         }
     }
     for (;;) {
@@ -1659,7 +1684,28 @@ static bool ident_ok(const char *s) {
     return lx_identifier_end(s, n, 0) == n;
 }
 
+static bool parse_program_with(Arena *arena, const char *src, size_t len, Program *out, CompileError *err,
+                               bool defer_units);
 bool parse_program(Arena *arena, const char *src, size_t len, Program *out, CompileError *err) {
+    return parse_program_with(arena, src, len, out, err, false);
+}
+bool parse_program_deferred(Arena *arena, const char *src, size_t len, Program *out, CompileError *err) {
+    return parse_program_with(arena, src, len, out, err, true);
+}
+bool lower_program_units(Arena *arena, Program *prog, const UnitNs *imported, int nimported, CompileError *err) {
+    Parser P;
+    memset(&P, 0, sizeof P);
+    P.arena = arena;
+    P.err = err;
+    jmp_buf jb;
+    P.jmp = &jb;
+    if (setjmp(jb))
+        return false;
+    lower_units(&P, prog, imported, nimported, true);
+    return true;
+}
+static bool parse_program_with(Arena *arena, const char *src, size_t len, Program *out, CompileError *err,
+                               bool defer_units) {
     memset(out, 0, sizeof *out);
     TokenList toks;
     if (!lex_source(arena, src, len, &toks, err, 0))
@@ -1911,26 +1957,17 @@ bool parse_program(Arena *arena, const char *src, size_t len, Program *out, Comp
             expect(&P, "end");
             finish(&P);
         } else if (ptext(&P, 0, "unitns") && peek(&P, 0)->kind == T_ID && peek(&P, 1)->kind == T_ID &&
-                   ptext(&P, 2, "for")) {
-            /* unitns time for int, float */
+                   (peek(&P, 2)->kind == T_NL || peek(&P, 2)->kind == T_EOF || ptext(&P, 2, "for"))) {
+            /* unitns time: its units apply to every numeric type */
             take(&P);
             UnitNs ns;
             memset(&ns, 0, sizeof ns);
             ns.line = peek(&P, 0)->line;
             ns.col = peek(&P, 0)->col;
             ns.name = tstr(&P, identifier(&P));
-            ns.real_spelling = "float";
-            expect(&P, "for");
-            do {
-                Token *k = take(&P);
-                if (tis(k, "int"))
-                    ns.integer = true;
-                else if (tis(k, "float") || tis(k, "double")) {
-                    ns.real = true;
-                    ns.real_spelling = tstr(&P, k);
-                } else
-                    pfail_at(&P, k->line, k->col, "unit namespaces hold int, float, or double values%s", "");
-            } while (accept(&P, ","));
+            if (ptext(&P, 0, "for"))
+                pfail_at(&P, peek(&P, 0)->line, peek(&P, 0)->col,
+                         "unitns takes only a name: write `unitns %s`; units apply to every numeric type", ns.name);
             finish(&P);
             for (int i = 0; i < out->nunitns; i++)
                 if (!strcmp(out->unitns[i].name, ns.name))
@@ -2138,7 +2175,8 @@ bool parse_program(Arena *arena, const char *src, size_t len, Program *out, Comp
             out->privates[out->nprivates++] = declared;
         }
     }
-    lower_units(&P, out);
+    if (!defer_units)
+        lower_units(&P, out, NULL, 0, false);
     lower_reactive(&P, out);
     callables = saved_callables;
     return true;

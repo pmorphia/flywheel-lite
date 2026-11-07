@@ -16,7 +16,7 @@ STDLIB  ?= $(FLYWHEEL_DIR)/stdlib/fw
 WARN    := -Wall -Wextra -Wno-unused-parameter
 SOURCES := $(wildcard src/*.c)
 HEADERS := $(wildcard src/*.h)
-LIBMODS := csv url log args bigint decimal random
+LIBMODS := csv url log args bigint decimal random metric imperial _time
 LIBSRC  := $(foreach m,$(LIBMODS),$(STDLIB)/$(m).fw)
 
 all: $(BUILD)/flywheel-lite
