@@ -92,7 +92,8 @@ protocol, enums and enums with data, `match` with every pattern form (values, ra
 members, types, `ok`/`error`, destructuring, guards), destructuring declarations, generics,
 nullable values, `try`/`catch`/`finally`/`then`, named errors, declared error types (`error Name(...)`,
 `throw Name with "message"`), `assert`, `defer`, `Result`, reactive variables (`reactive`, `when`,
-`computed`), negated bool aliases (`bool on/off`), units (`unitns name`, `unit`, `unitconv`, quantity
+`computed`), one-call `run` bodies (`if x run f()`, `else run g()`, `for i in xs run f(i)`),
+negated bool aliases (`bool on/off`), units (`unitns name`, `unit`, `unitconv`, quantity
 literals such as `100m`, quantity types of any numeric type such as `u8[time]` and
 `float[metric.length]`, `x in cm`, `type`/`unit`/`unitns`, units shared across modules, `unitconv A = B`
 between namespaces (`1m + 1ft`), and the `metric`, `imperial`, and `time` unit libraries),

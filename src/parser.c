@@ -1127,7 +1127,8 @@ static Node *outer(Parser *P) {
             Node *last = n->args.items[n->args.count - 1];
             Token *nx = peek(P, 0);
             if ((last->kind == N_NAME || last->kind == N_MEMBER) && argument_start(nx) &&
-                !(nx->kind == T_ID && (precedence(nx) > 0 || tis(nx, "then") || tis(nx, "do"))))
+                !(nx->kind == T_ID && (precedence(nx) > 0 || tis(nx, "then") || tis(nx, "do") ||
+                                       tis(nx, "else"))))
                 pfail_at(P, nx->line, nx->col, "nested calls require parentheses around their arguments%s", "");
             e = n;
         }
@@ -1209,8 +1210,74 @@ typedef struct {
 } WhenParts;
 static void spec_when(Parser *P, void *ctx) {
     ((WhenParts *)ctx)->cond = expression(P, 0);
-    if (!ptext(P, 0, "do"))
+    if (!ptext(P, 0, "do") && !(ptext(P, 0, "run") && peek(P, 0)->kind == T_ID))
         pfail(P, "expected do%s", "");
+}
+/* `run` (a soft keyword) introduces a one-call body: `if/while/for/when ... run call`. */
+static bool runs(Parser *P) {
+    if (!ptext(P, 0, "run") || peek(P, 0)->kind != T_ID)
+        return false;
+    take(P);
+    return true;
+}
+#define RUN_USAGE "'run' expects a function call, such as 'run greet()'"
+/* The call after `run`, with no `end`. It cannot be a keyword statement, a declaration, or an
+   assignment. */
+static void run_body(Parser *P, NodeList *out) {
+    Token *t = peek(P, 0);
+    if (t->kind == T_NL || t->kind == T_EOF)
+        pfail(P, RUN_USAGE "%s", "");
+    static const char *keywords[] = {
+        "import", "var",   "const",    "class", "function", "component", "return",   "if",
+        "then",   "else",  "while",    "do",    "for",      "end",       "break",    "continue",
+        "try",    "catch", "finally",  "throw", "match",    "case",      "defer",    "when",
+        "reactive", "computed", "assert", "enum", "interface", NULL};
+    if (t->kind == T_ID && in_list(t, keywords) && !(tis(t, "function") && ptext(P, 1, "(")))
+        pfail(P, RUN_USAGE ", not '%s'", tstr(P, t));
+    Node *s = tnode(P, S_EXPR, NULL, t);
+    s->target = outer(P);
+    static const char *assign_ops[] = {"=", "+=", "-=", "*=", "/=", "//=", "%=", NULL};
+    Token *nx = peek(P, 0);
+    if (nx->kind == T_OP && in_list(nx, assign_ops))
+        pfail(P, RUN_USAGE "; assignments need 'then' or 'do' ... 'end'%s", "");
+    if (s->target->kind != N_CALL)
+        pfail_at(P, t->line, t->col, RUN_USAGE "%s", "");
+    nl_push(P->arena, out, s);
+}
+static void spec_run_condition(Parser *P, void *ctx) {
+    (void)ctx;
+    expression(P, 0);
+    if (!ptext(P, 0, "run") || peek(P, 0)->kind != T_ID)
+        pfail(P, "expected run%s", "");
+}
+/* After `if condition run call`, the chain continues with `else run call` or
+   `else if condition run call`, on the same line or the next. Any other `else` belongs to an
+   enclosing `if ... then`. */
+static void run_else(Parser *P, Node *s) {
+    int saved = P->pos;
+    newlines(P);
+    if (ptext(P, 0, "else") && peek(P, 0)->kind == T_ID) {
+        int else_pos = P->pos;
+        take(P);
+        if (runs(P)) {
+            run_body(P, &s->other);
+            finish(P);
+            return;
+        }
+        if (ptext(P, 0, "if") && peek(P, 0)->kind == T_ID) {
+            int if_pos = P->pos;
+            take(P);
+            bool chained = speculate(P, spec_run_condition, NULL);
+            P->pos = if_pos;
+            if (chained) {
+                nl_push(P->arena, &s->other, statement(P));
+                return;
+            }
+        }
+        P->pos = else_pos;
+    }
+    P->pos = saved;
+    finish(P);
 }
 /* `bool name/negated = ...` */
 static bool alias_declaration(Parser *P) {
@@ -1347,12 +1414,22 @@ static Node *statement(Parser *P) {
     if (accept(P, "if")) {
         s->kind = S_IF;
         s->expr = expression(P, 0);
+        if (runs(P)) {
+            run_body(P, &s->body);
+            run_else(P, s);
+            return s;
+        }
         expect(P, "then");
         finish(P);
         block(P, &s->body);
         if (accept(P, "else")) {
             if (ptext(P, 0, "if")) {
                 nl_push(P->arena, &s->other, statement(P));
+                return s;
+            }
+            if (runs(P)) {
+                run_body(P, &s->other);
+                finish(P);
                 return s;
             }
             finish(P);
@@ -1423,6 +1500,11 @@ static Node *statement(Parser *P) {
     if (accept(P, "while")) {
         s->kind = S_WHILE;
         s->expr = expression(P, 0);
+        if (runs(P)) {
+            run_body(P, &s->body);
+            finish(P);
+            return s;
+        }
         expect(P, "do");
         finish(P);
         block(P, &s->body);
@@ -1439,6 +1521,11 @@ static Node *statement(Parser *P) {
             s->op = tstr(P, identifier(P));
         expect(P, "in");
         s->expr = expression(P, 0);
+        if (runs(P)) {
+            run_body(P, &s->body);
+            finish(P);
+            return s;
+        }
         expect(P, "do");
         finish(P);
         block(P, &s->body);
@@ -1479,11 +1566,16 @@ static Node *statement(Parser *P) {
         Token *at = take(P);
         WhenParts w = {NULL};
         if (peek(P, 0)->kind != T_NL && !ptext(P, 0, "do") && speculate(P, spec_when, &w)) {
-            take(P); /* do */
             s->kind = S_WHEN;
             s->line = at->line;
             s->col = at->col;
             s->expr = w.cond;
+            if (runs(P)) {
+                run_body(P, &s->body);
+                finish(P);
+                return s;
+            }
+            take(P); /* do */
             finish(P);
             block(P, &s->body);
             expect(P, "end");
