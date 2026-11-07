@@ -624,7 +624,58 @@ typedef struct {
     Parser *P;
     Binding *items;
     int count, cap, depth, counter;
+    /* Names that a `when` condition or `computed` expression reads: a plain variable with one of
+     * these names is made reactive, so `when delay == 10s do` works on `int[time] delay`. */
+    const char **watched;
+    int nwatched, capwatched;
 } Lowerer;
+
+static void watch_reads(Lowerer *L, Node *e) {
+    if (!e)
+        return;
+    if (e->kind == N_NAME && e->text) {
+        if (L->nwatched == L->capwatched) {
+            L->capwatched = GROW_CAP(L->capwatched);
+            L->watched = realloc(L->watched, sizeof(const char *) * (size_t)L->capwatched);
+        }
+        L->watched[L->nwatched++] = e->text;
+    }
+    for (int i = 0; i < e->args.count; i++)
+        watch_reads(L, e->args.items[i]);
+}
+static void watch_list(Lowerer *L, NodeList *l);
+static void watch_lambdas(Lowerer *L, Node *e) {
+    if (!e)
+        return;
+    for (int i = 0; i < e->args.count; i++)
+        watch_lambdas(L, e->args.items[i]);
+    if (e->fn)
+        watch_list(L, &e->fn->body);
+}
+static void watch_list(Lowerer *L, NodeList *l) {
+    for (int i = 0; i < l->count; i++) {
+        Node *s = l->items[i];
+        if (s->kind == S_WHEN || (s->kind == S_DECLARE && s->op && !strcmp(s->op, "computed")))
+            watch_reads(L, s->expr);
+        watch_lambdas(L, s->expr);
+        watch_lambdas(L, s->target);
+        watch_list(L, &s->body);
+        watch_list(L, &s->other);
+        watch_list(L, &s->finalizer);
+        for (int c = 0; c < s->ncatches; c++)
+            watch_list(L, &s->catches[c]);
+    }
+}
+static bool watched(Lowerer *L, const char *name) {
+    for (int i = 0; name && i < L->nwatched; i++)
+        if (!strcmp(L->watched[i], name))
+            return true;
+    return false;
+}
+/* A plain declaration that a `when` or `computed` reads becomes reactive. */
+static bool promoted(Lowerer *L, Node *s) {
+    return !(s->op && !strcmp(s->op, "const")) && (watched(L, s->name) || watched(L, s->alias));
+}
 
 static void bind(Lowerer *L, const char *name, int kind, const char *target) {
     if (!name)
@@ -697,7 +748,8 @@ static int require_dependencies(Lowerer *L, Node *e, const char *what, Node *at,
     dependencies(L, e, out, &n, cap);
     if (!n)
         parser_fail(L->P, at->line, at->col,
-                    "%s must read a reactive or computed variable, such as `reactive bool alive = true`", what);
+                    "%s must read a variable, such as `alive` in `when alive do`; parameters and loop "
+                    "variables are not watched", what);
     return n;
 }
 static void block(Lowerer *L, NodeList *list, bool top);
@@ -802,8 +854,8 @@ static void block(Lowerer *L, NodeList *list, bool top) {
                 i = after - 1;
                 continue;
             }
-            bool reactive = s->op && !strcmp(s->op, "reactive");
-            if (reactive)
+            bool reactive = (s->op && !strcmp(s->op, "reactive")) || promoted(L, s);
+            if (s->op && !strcmp(s->op, "reactive"))
                 s->op = "var";
             bind(L, s->name, reactive ? B_REACTIVE : B_PLAIN, NULL);
             if (s->alias)
@@ -985,16 +1037,22 @@ void lower_reactive(Parser *P, Program *p) {
             any = uses_list(&p->classes[c].methods[m].body);
     if (!any)
         return;
-    Lowerer L = {P, NULL, 0, 0, 0, 0};
+    Lowerer L = {P, NULL, 0, 0, 0, 0, NULL, 0, 0};
+    watch_list(&L, &p->body);
+    for (int i = 0; i < p->nfunctions; i++)
+        watch_list(&L, &p->functions[i].body);
+    for (int c = 0; c < p->nclasses; c++)
+        for (int m = 0; m < p->classes[c].nmethods; m++)
+            watch_list(&L, &p->classes[c].methods[m].body);
     /* Top-level declarations are visible in every function, whatever their position. */
     push_scope(&L);
     for (int i = 0; i < p->body.count; i++) {
         Node *s = p->body.items[i];
         if (s->kind != S_DECLARE)
             continue;
-        int kind = !s->op ? B_PLAIN : !strcmp(s->op, "reactive") ? B_REACTIVE
-                                  : !strcmp(s->op, "computed") ? B_COMPUTED
-                                                               : B_PLAIN;
+        int kind = s->op && !strcmp(s->op, "computed") ? B_COMPUTED
+                   : (s->op && !strcmp(s->op, "reactive")) || promoted(&L, s) ? B_REACTIVE
+                                                                               : B_PLAIN;
         bind(&L, s->name, kind, NULL);
         if (s->alias)
             bind(&L, s->alias, B_ALIAS, s->name);
@@ -1007,4 +1065,5 @@ void lower_reactive(Parser *P, Program *p) {
     block(&L, &p->body, true);
     pop_scope(&L);
     free(L.items);
+    free(L.watched);
 }

@@ -1055,12 +1055,23 @@ static bool attached_sign(Parser *P, int n) {
     Token *t = peek(P, n);
     return (tis(t, "-") || tis(t, "+")) && t->kind == T_OP && t->spaced && !peek(P, n + 1)->spaced;
 }
-static bool grouped_operand(Parser *P) {
-    Token *t1 = peek(P, 1);
+/* The callee's width in tokens: a name, or a dotted path written without spaces (time.sleep). */
+static int callee_width(Parser *P) {
+    int width = 1;
+    if (peek(P, 0)->kind == T_ID)
+        while (tis(peek(P, width), ".") && !peek(P, width)->spaced &&
+               peek(P, width + 1)->kind == T_ID && !peek(P, width + 1)->spaced)
+            width += 2;
+    return width;
+}
+/* `print (1+2)*3` passes `(1+2)*3`: a spaced '(' group followed by a binary operator, or by `.` or
+ * `[` written against it, opens the argument (`time.sleep (delay in s).value`). */
+static bool grouped_operand(Parser *P, int width) {
+    Token *t1 = peek(P, width);
     if (!tis(t1, "(") || !t1->spaced || t1->kind != T_OP)
         return false;
     int depth = 0;
-    for (int n = 1;; ++n) {
+    for (int n = width;; ++n) {
         Token *t = peek(P, n);
         if (t->kind == T_EOF)
             return false;
@@ -1070,6 +1081,8 @@ static bool grouped_operand(Parser *P) {
             ++depth;
         else if (t->kind == T_OP && (tis(t, ")") || tis(t, "]") || tis(t, "}")) && --depth == 0) {
             Token *next = peek(P, n + 1);
+            if ((tis(next, ".") || tis(next, "[")) && next->kind == T_OP && !next->spaced)
+                return true;
             return (next->kind == T_OP || next->kind == T_ID) && precedence(next) > 0;
         }
     }
@@ -1082,8 +1095,19 @@ static Node *outer(Parser *P) {
     Token *first = peek(P, 0);
     bool callable = is_callable_name(P, first);
     Node *e;
-    bool grouped = callable && grouped_operand(P);
-    if (callable && (attached_sign(P, 1) || ptext(P, 1, "not") || grouped ||
+    int width = callee_width(P);
+    bool grouped = (callable || width > 1) && grouped_operand(P, width);
+    if (grouped && width > 1) {
+        Token *t = take(P);
+        e = tnode(P, N_NAME, tstr(P, t), t);
+        for (; width > 1; width -= 2) {
+            take(P);
+            Token *m = take(P);
+            Node *n = tnode(P, N_MEMBER, tstr(P, m), m);
+            nl_push(P->arena, &n->args, e);
+            e = n;
+        }
+    } else if (callable && (attached_sign(P, 1) || ptext(P, 1, "not") || grouped ||
                      (ptext(P, 1, "[") && peek(P, 1)->spaced))) {
         Token *t = take(P);
         e = tnode(P, N_NAME, tstr(P, t), t);
@@ -1827,11 +1851,22 @@ static bool parse_program_with(Arena *arena, const char *src, size_t len, Progra
                 out->html = true;
             if (im.wildcard && !strcmp(im.name, "svg"))
                 out->svg = true;
+            /* `import time.time` names the time unit namespace, which `import time` brings. */
+            if (!im.path && !strcmp(im.name, "time.time"))
+                im.name = "time";
+            bool repeat = false;
             for (int i = 0; i < out->nimports; i++)
-                if (!strcmp(out->imports[i].alias, alias) && !im.wildcard && !out->imports[i].wildcard)
-                    pfail_at(&P, im.line, 1, "duplicate import '%s'", alias);
-            GROWV(arena, out->imports, out->nimports, cap_imp, ImportDecl);
-            out->imports[out->nimports++] = im;
+                if (!strcmp(out->imports[i].alias, alias) && !im.wildcard && !out->imports[i].wildcard) {
+                    /* the same module under the same name again changes nothing */
+                    if (!im.path && !out->imports[i].path && !strcmp(out->imports[i].name, im.name))
+                        repeat = true;
+                    else
+                        pfail_at(&P, im.line, 1, "duplicate import '%s'", alias);
+                }
+            if (!repeat) {
+                GROWV(arena, out->imports, out->nimports, cap_imp, ImportDecl);
+                out->imports[out->nimports++] = im;
+            }
             finish(&P);
         } else if (ptext(&P, 0, "function") && !ptext(&P, 1, "(")) {
             FuncDecl *f = parse_function(&P, NULL, false);

@@ -1480,10 +1480,27 @@ NATIVE(t_millis) {
     *out = val_int((int64_t)(now_monotonic() * 1000.0));
     return true;
 }
+/* A duration in seconds: a number, or a time quantity (`500ms`, `delay`) converted to seconds. */
+static bool duration_seconds(VM *vm, Value v, double *s, const char *what, bool *quantity) {
+    char ns[128];
+    bool real;
+    *quantity = IS_OBJT(v, OBJ_INSTANCE) &&
+                quantity_class_name(AS_INSTANCE(v)->klass->name->chars, ns, sizeof ns, &real);
+    if (!*quantity)
+        return to_double(vm, v, s, what);
+    if (strcmp(ns, "time") != 0)
+        return vm_throw(vm, "TypeError", "%s expects seconds or a time quantity, not %s[%s]", what,
+                        real ? "float" : "int", ns);
+    Value converted;
+    if (!vm_quantity_in(vm, v, val_obj(str_intern_c(vm, "s")), &converted))
+        return false;
+    return to_double(vm, AS_INSTANCE(converted)->fields[0], s, what);
+}
 NATIVE(t_sleep) {
     (void)argc;
     double s;
-    if (!to_double(vm, args[0], &s, "time.sleep"))
+    bool quantity;
+    if (!duration_seconds(vm, args[0], &s, "time.sleep", &quantity))
         return false;
     fflush(stdout);
     sleep_seconds(s);
@@ -1493,10 +1510,11 @@ NATIVE(t_sleep) {
 NATIVE(t_sleep_ms) {
     (void)argc;
     double s;
-    if (!to_double(vm, args[0], &s, "time.sleep_ms"))
+    bool quantity;
+    if (!duration_seconds(vm, args[0], &s, "time.sleep_ms", &quantity))
         return false;
     fflush(stdout);
-    sleep_seconds(s / 1000.0);
+    sleep_seconds(quantity ? s : s / 1000.0);
     *out = val_null();
     return true;
 }
