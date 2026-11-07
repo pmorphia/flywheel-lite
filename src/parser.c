@@ -16,6 +16,12 @@ void nl_push(Arena *a, NodeList *l, Node *n) {
     l->items[l->count++] = n;
 }
 
+void nl_insert(Arena *a, NodeList *l, int at, Node *n) {
+    nl_push(a, l, n);
+    memmove(&l->items[at + 1], &l->items[at], sizeof(Node *) * (size_t)(l->count - 1 - at));
+    l->items[at] = n;
+}
+
 #define GROWV(a, arr, count, cap, T)                                                              \
     do {                                                                                          \
         if ((count) == (cap)) {                                                                   \
@@ -69,6 +75,16 @@ static void sb_utf8(SBuf *b, uint32_t v) {
 }
 
 TB_NORETURN static void pfail_at(Parser *P, int line, int col, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(P->err->message, sizeof P->err->message, fmt, ap);
+    va_end(ap);
+    P->err->line = line;
+    P->err->col = col;
+    longjmp(*P->jmp, 1);
+}
+
+void parser_fail(Parser *P, int line, int col, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(P->err->message, sizeof P->err->message, fmt, ap);
@@ -280,6 +296,7 @@ static void type_into(Parser *P, SBuf *r) {
         Token *t = take(P);
         if (t->kind != T_ID)
             pfail_at(P, t->line, t->col, "expected type%s", "");
+        size_t start = r->n;
         sb_add(r, t->text, (size_t)t->len);
         while (accept(P, ".")) {
             Token *m = identifier(P);
@@ -295,6 +312,18 @@ static void type_into(Parser *P, SBuf *r) {
             }
             expect(P, ">");
             sb_addc(r, '>');
+        }
+        /* int[time] / float[time]: a quantity in a unit namespace (its hidden class, lower.c) */
+        if ((tis(t, "int") || tis(t, "float") || tis(t, "double")) && r->n == start + (size_t)t->len &&
+            ptext(P, 0, "[") && peek(P, 1)->kind == T_ID && ptext(P, 2, "]")) {
+            take(P);
+            Token *ns = identifier(P);
+            take(P);
+            bool integer = tis(t, "int");
+            r->n = start;
+            sb_adds(r, "__fwu_");
+            sb_add(r, ns->text, (size_t)ns->len);
+            sb_adds(r, integer ? "__int" : "__double");
         }
     }
     for (;;) {
@@ -759,6 +788,26 @@ static Node *prefix(Parser *P) {
     } else if (t->kind == T_INT || t->kind == T_REAL) {
         take(P);
         e = tnode(P, t->kind == T_INT ? N_INT : N_REAL, tstr(P, t), t);
+        /* A quantity literal: a number with a unit right after it, 100m, 0.32km, 15time.s. */
+        static const char *not_units[] = {"and", "or", "not", "in", "is", "as", "then", "do", "else",
+                                          "end", "which", "with", "returns", "if", "for", "while",
+                                          "true", "false", "null", NULL};
+        Token *u = peek(P, 0);
+        if (u->kind == T_ID && !u->spaced && !in_list(u, not_units)) {
+            take(P);
+            SBuf unit = {0};
+            sb_add(&unit, u->text, (size_t)u->len);
+            if (ptext(P, 0, ".") && !peek(P, 0)->spaced && peek(P, 1)->kind == T_ID && !peek(P, 1)->spaced) {
+                take(P);
+                Token *m = take(P);
+                sb_addc(&unit, '.');
+                sb_add(&unit, m->text, (size_t)m->len);
+            }
+            Node *q = tnode(P, N_UNITLIT, arena_strndup(P->arena, unit.d, unit.n), t);
+            free(unit.d);
+            nl_push(P->arena, &q->args, e);
+            e = q;
+        }
     } else if (t->kind == T_CHAR) {
         take(P);
         Node *text = string_expr(P, t->text, (size_t)t->len, t->line, t->col);
@@ -1106,13 +1155,39 @@ static void spec_assert_call(Parser *P, void *ctx) {
         pfail(P, "not a call%s", "");
 }
 
+typedef struct {
+    Node *cond;
+} WhenParts;
+static void spec_when(Parser *P, void *ctx) {
+    ((WhenParts *)ctx)->cond = expression(P, 0);
+    if (!ptext(P, 0, "do"))
+        pfail(P, "expected do%s", "");
+}
+/* `bool name/negated = ...` */
+static bool alias_declaration(Parser *P) {
+    if (peek(P, 0)->kind != T_ID || peek(P, 1)->kind != T_ID || !ptext(P, 2, "/") ||
+        peek(P, 2)->kind != T_OP || peek(P, 3)->kind != T_ID || !ptext(P, 4, "="))
+        return false;
+    if (ptext(P, 0, "var") || ptext(P, 0, "const"))
+        pfail(P, "negated aliases need the bool type: bool %s/... = ...", tstr(P, peek(P, 1)));
+    if (!ptext(P, 0, "bool"))
+        pfail(P, "negated aliases (name/negated) are only for bool, such as bool enabled/disabled = true%s", "");
+    return true;
+}
 static Node *statement(Parser *P) {
     Token *st = peek(P, 0);
     Node *s = tnode(P, S_EXPR, NULL, st);
     if (accept(P, "throw")) {
+        /* throw value, throw Type with "message", throw "Name" with "message" (or "Name" "message") */
         s->kind = S_THROW;
         s->expr = expression(P, 0);
-        if (peek(P, 0)->kind != T_NL && peek(P, 0)->kind != T_EOF) {
+        if (ptext(P, 0, "with") && peek(P, 0)->kind == T_ID) {
+            take(P);
+            s->op = "with";
+            if (peek(P, 0)->kind == T_NL || peek(P, 0)->kind == T_EOF)
+                pfail(P, "'with' expects a message, such as throw BadInput with \"the input is bad\"%s", "");
+            s->target = expression(P, 0);
+        } else if (peek(P, 0)->kind != T_NL && peek(P, 0)->kind != T_EOF) {
             accept(P, ",");
             s->target = expression(P, 0);
         }
@@ -1349,7 +1424,56 @@ static Node *statement(Parser *P) {
         finish(P);
         return s;
     }
+    /* `when condition do ... end` (lowered by lower.c) */
+    if (ptext(P, 0, "when") && peek(P, 0)->kind == T_ID) {
+        int saved = P->pos;
+        Token *at = take(P);
+        WhenParts w = {NULL};
+        if (peek(P, 0)->kind != T_NL && !ptext(P, 0, "do") && speculate(P, spec_when, &w)) {
+            take(P); /* do */
+            s->kind = S_WHEN;
+            s->line = at->line;
+            s->col = at->col;
+            s->expr = w.cond;
+            finish(P);
+            block(P, &s->body);
+            expect(P, "end");
+            finish(P);
+            return s;
+        }
+        P->pos = saved;
+    }
+    /* `reactive` and `computed` declarations */
+    const char *declaration_kind = NULL;
+    if ((ptext(P, 0, "reactive") || ptext(P, 0, "computed")) && peek(P, 0)->kind == T_ID) {
+        int saved = P->pos;
+        Token *kw = take(P);
+        if (ptext(P, 0, "const"))
+            pfail(P, "'%s' declarations cannot be const", tstr(P, kw));
+        if (ptext(P, 0, "var") || alias_declaration(P) || typed_declaration(P))
+            declaration_kind = tstr(P, kw);
+        else
+            P->pos = saved;
+    }
+    if (alias_declaration(P)) {
+        /* bool enabled/disabled = true: `disabled` reads and writes the negation of `enabled` */
+        s->kind = S_DECLARE;
+        s->op = declaration_kind ? declaration_kind : "var";
+        s->type = parse_type(P);
+        s->name = tstr(P, identifier(P));
+        expect(P, "/");
+        Token *neg = identifier(P);
+        s->alias = tstr(P, neg);
+        if (!strcmp(s->alias, s->name))
+            pfail_at(P, neg->line, neg->col, "a negated alias needs a different name%s", "");
+        expect(P, "=");
+        s->expr = outer(P);
+        finish(P);
+        return s;
+    }
     bool isconst = accept(P, "const"), inferred = accept(P, "var");
+    if (declaration_kind && (ptext(P, 0, "(") || ptext(P, 0, "[")))
+        pfail(P, "'%s' declares one variable at a time", declaration_kind);
     if ((isconst || inferred) && (ptext(P, 0, "(") || ptext(P, 0, "["))) {
         const char *close = tis(take(P), "(") ? ")" : "]";
         Token *names[256];
@@ -1392,7 +1516,7 @@ static Node *statement(Parser *P) {
     }
     if (isconst || inferred || typed_declaration(P)) {
         s->kind = S_DECLARE;
-        s->op = isconst ? "const" : "var";
+        s->op = isconst ? "const" : declaration_kind ? declaration_kind : "var";
         if (!inferred && !ptext(P, 1, "="))
             s->type = parse_type(P);
         s->name = tstr(P, identifier(P));
@@ -1786,6 +1910,145 @@ bool parse_program(Arena *arena, const char *src, size_t len, Program *out, Comp
             }
             expect(&P, "end");
             finish(&P);
+        } else if (ptext(&P, 0, "unitns") && peek(&P, 0)->kind == T_ID && peek(&P, 1)->kind == T_ID &&
+                   ptext(&P, 2, "for")) {
+            /* unitns time for int, float */
+            take(&P);
+            UnitNs ns;
+            memset(&ns, 0, sizeof ns);
+            ns.line = peek(&P, 0)->line;
+            ns.col = peek(&P, 0)->col;
+            ns.name = tstr(&P, identifier(&P));
+            ns.real_spelling = "float";
+            expect(&P, "for");
+            do {
+                Token *k = take(&P);
+                if (tis(k, "int"))
+                    ns.integer = true;
+                else if (tis(k, "float") || tis(k, "double")) {
+                    ns.real = true;
+                    ns.real_spelling = tstr(&P, k);
+                } else
+                    pfail_at(&P, k->line, k->col, "unit namespaces hold int, float, or double values%s", "");
+            } while (accept(&P, ","));
+            finish(&P);
+            for (int i = 0; i < out->nunitns; i++)
+                if (!strcmp(out->unitns[i].name, ns.name))
+                    pfail_at(&P, ns.line, ns.col, "duplicate unit namespace '%s'", ns.name);
+            GROWV(arena, out->unitns, out->nunitns, out->capunitns, UnitNs);
+            out->unitns[out->nunitns++] = ns;
+        } else if (ptext(&P, 0, "unit") && peek(&P, 0)->kind == T_ID && peek(&P, 1)->kind == T_ID &&
+                   ptext(&P, 2, ".") && peek(&P, 3)->kind == T_ID && ptext(&P, 4, "=")) {
+            /* unit time.min = 60 */
+            take(&P);
+            Token *nst = identifier(&P);
+            expect(&P, ".");
+            Token *ut = identifier(&P);
+            expect(&P, "=");
+            SBuf factor = {0};
+            for (int part = 0; part < 2; part++) {
+                Token *n = take(&P);
+                if (n->kind != T_INT && n->kind != T_REAL)
+                    pfail_at(&P, n->line, n->col, "a unit's factor is a positive number, such as unit "
+                                                  "time.min = 60 or unit time.ms = 1/1000%s", "");
+                sb_add(&factor, n->text, (size_t)n->len);
+                if (part == 1 || !accept(&P, "/"))
+                    break;
+                sb_addc(&factor, '/');
+            }
+            finish(&P);
+            UnitNs *ns = NULL;
+            for (int i = 0; i < out->nunitns; i++)
+                if (tis(nst, out->unitns[i].name))
+                    ns = &out->unitns[i];
+            if (!ns)
+                pfail_at(&P, nst->line, nst->col, "unknown unit namespace '%s'; declare it first with unitns",
+                         tstr(&P, nst));
+            const char *uname = tstr(&P, ut);
+            for (int i = 0; i < ns->nunits; i++)
+                if (!strcmp(ns->units[i], uname))
+                    pfail_at(&P, ut->line, ut->col, "duplicate unit '%s.%s'", ns->name, uname);
+            int cap = ns->capunits;
+            GROWV(arena, ns->units, ns->nunits, cap, const char *);
+            cap = ns->capunits;
+            GROWV(arena, ns->factors, ns->nunits, cap, const char *);
+            cap = ns->capunits;
+            GROWV(arena, ns->unit_lines, ns->nunits, cap, int);
+            ns->capunits = cap;
+            ns->units[ns->nunits] = uname;
+            ns->factors[ns->nunits] = arena_strndup(arena, factor.d, factor.n);
+            ns->unit_lines[ns->nunits++] = ut->line;
+            free(factor.d);
+        } else if (ptext(&P, 0, "unitconv") && peek(&P, 0)->kind == T_ID &&
+                   (peek(&P, 1)->kind == T_INT || peek(&P, 1)->kind == T_REAL)) {
+            /* unitconv 1metric_length.m / 1time.s = 1metric_speed.mps */
+            UnitConv c;
+            memset(&c, 0, sizeof c);
+            Token *kw = take(&P);
+            c.line = kw->line;
+            c.col = kw->col;
+            for (int k = 0; k < 3; k++) {
+                Token *n = take(&P);
+                if (n->kind != T_INT && n->kind != T_REAL)
+                    pfail_at(&P, n->line, n->col, "unitconv relates quantities, such as unitconv "
+                                                  "1metric_length.m / 1time.s = 1metric_speed.mps%s", "");
+                c.amounts[k] = tstr(&P, n);
+                Token *first = identifier(&P);
+                if (!accept(&P, "."))
+                    pfail_at(&P, first->line, first->col, "unitconv names units with their namespace, such as 1time.s%s", "");
+                c.namespaces[k] = tstr(&P, first);
+                c.units[k] = tstr(&P, identifier(&P));
+                if (k == 0) {
+                    if (!ptext(&P, 0, "*") && !ptext(&P, 0, "/"))
+                        pfail(&P, "unitconv expects * or / between the first two quantities%s", "");
+                    c.op = tstr(&P, take(&P));
+                } else if (k == 1)
+                    expect(&P, "=");
+            }
+            finish(&P);
+            GROWV(arena, out->unitconvs, out->nunitconvs, out->capunitconvs, UnitConv);
+            out->unitconvs[out->nunitconvs++] = c;
+        } else if (ptext(&P, 0, "error") && peek(&P, 0)->kind == T_ID && peek(&P, 1)->kind == T_ID &&
+                   (peek(&P, 2)->kind == T_NL || peek(&P, 2)->kind == T_EOF || ptext(&P, 2, "("))) {
+            /* error Name / error Name(int status): a class with readonly fields and a trailing
+             * `string message = ""`, which `throw Name with "message"` sets. */
+            take(&P);
+            ClassDecl c;
+            memset(&c, 0, sizeof c);
+            c.line = peek(&P, 0)->line;
+            c.name = tstr(&P, identifier(&P));
+            int capf = 0;
+            if (accept(&P, "(") && !accept(&P, ")")) {
+                do {
+                    GROWV(arena, c.fields, c.nfields, capf, Param);
+                    Param *fp = &c.fields[c.nfields++];
+                    memset(fp, 0, sizeof *fp);
+                    fp->line = peek(&P, 0)->line;
+                    fp->readonly = true;
+                    fp->type = parse_type(&P);
+                    Token *fn = identifier(&P);
+                    fp->name = tstr(&P, fn);
+                    if (!strcmp(fp->name, "message"))
+                        pfail_at(&P, fn->line, fn->col, "error types already have a message field%s", "");
+                    for (int i = 0; i + 1 < c.nfields; i++)
+                        if (!strcmp(c.fields[i].name, fp->name))
+                            pfail_at(&P, fn->line, fn->col, "duplicate field '%s'", fp->name);
+                    if (accept(&P, "="))
+                        fp->value = expression(&P, 0);
+                } while (accept(&P, ","));
+                expect(&P, ")");
+            }
+            GROWV(arena, c.fields, c.nfields, capf, Param);
+            Param *mp = &c.fields[c.nfields++];
+            memset(mp, 0, sizeof *mp);
+            mp->line = c.line;
+            mp->readonly = true;
+            mp->type = "string";
+            mp->name = "message";
+            mp->value = node(&P, N_STRING, "", c.line, 1);
+            finish(&P);
+            GROWV(arena, out->classes, out->nclasses, cap_cls, ClassDecl);
+            out->classes[out->nclasses++] = c;
         } else if (ptext(&P, 0, "class") || ptext(&P, 0, "interface")) {
             ClassDecl c;
             memset(&c, 0, sizeof c);
@@ -1875,6 +2138,8 @@ bool parse_program(Arena *arena, const char *src, size_t len, Program *out, Comp
             out->privates[out->nprivates++] = declared;
         }
     }
+    lower_units(&P, out);
+    lower_reactive(&P, out);
     callables = saved_callables;
     return true;
 }

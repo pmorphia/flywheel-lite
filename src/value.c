@@ -572,7 +572,11 @@ const char *obj_kind_name(Value v) {
 }
 const char *type_name_of(VM *vm, Value v, Buf *b) {
     (void)vm;
-    if (IS_OBJT(v, OBJ_INSTANCE)) {
+    char ns[96];
+    bool real;
+    if (IS_OBJT(v, OBJ_INSTANCE) && quantity_class_name(AS_INSTANCE(v)->klass->name->chars, ns, sizeof ns, &real)) {
+        buf_printf(b, "%s[%s]", real ? "float" : "int", ns); /* hidden quantity class (lower.c) */
+    } else if (IS_OBJT(v, OBJ_INSTANCE)) {
         buf_adds(b, AS_INSTANCE(v)->klass->name->chars);
     } else if (IS_OBJT(v, OBJ_ENUMVAL)) {
         buf_adds(b, ((ObjEnumVal *)AS_OBJ(v))->e->name->chars);

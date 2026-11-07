@@ -79,6 +79,7 @@ typedef struct {
     int nglobal_types;
     bool *global_const;
     int line, col;
+    const char *unit_hint; /* declared type of the declaration being compiled, for 100m literals */
 } Compiler;
 
 TB_NORETURN static void cfail(Compiler *C, int line, const char *fmt, ...) {
@@ -160,6 +161,12 @@ static bool type_converts(ObjTypeDesc *t) {
         return true;
     case TY_INT:
         return t->bits < 64 || t->is_unsigned;
+    case TY_NAMED: {
+        /* float[ns] converts int[ns] values on assignment, as at declarations */
+        char ns[96];
+        bool real;
+        return t->name && quantity_class_name(t->name->chars, ns, sizeof ns, &real) && real;
+    }
     case TY_NULLABLE:
     case TY_ARRAY:
         return t->nargs && t->args[0]->convert;
@@ -807,6 +814,126 @@ static bool compile_cast_with_type(Compiler *C, Node *e, Value type) {
     return true;
 }
 
+/* ---------------------------------------------------------------- units (see lower.c) */
+
+static UnitNs *unit_namespace(Compiler *C, const char *name) {
+    for (int i = 0; i < C->prog->nunitns; i++)
+        if (!strcmp(C->prog->unitns[i].name, name))
+            return &C->prog->unitns[i];
+    return NULL;
+}
+static int unit_slot(UnitNs *ns, const char *unit) {
+    for (int i = 0; i < ns->nunits; i++)
+        if (!strcmp(ns->units[i], unit))
+            return i;
+    return -1;
+}
+static Node *synth(Compiler *C, NodeKind kind, const char *text, Node *at) {
+    Node *n = arena_alloc(C->arena, sizeof(Node));
+    n->kind = kind;
+    n->text = text;
+    n->line = at->line;
+    n->col = at->col;
+    n->len = -1;
+    return n;
+}
+/* 100m, 0.32km, 15time.s: the namespace comes from the spelling, the declared type, or the only
+ * namespace with the unit. The literal constructs the namespace's hidden class. */
+static void compile_quantity(Compiler *C, Node *e) {
+    char unit[128], member[128] = "";
+    snprintf(unit, sizeof unit, "%s", e->text);
+    UnitNs *ns = NULL;
+    char *dot = strchr(unit, '.');
+    if (dot) {
+        *dot = 0;
+        ns = unit_namespace(C, unit);
+        if (ns)
+            memmove(unit, dot + 1, strlen(dot + 1) + 1);
+        else
+            snprintf(member, sizeof member, "%s", dot + 1); /* 15s.value */
+        if (ns && unit_slot(ns, unit) < 0)
+            cfail(C, e->line, "unit namespace '%s' has no unit '%s'", ns->name, unit);
+    }
+    /* the declared type: int[ns], int[ns]?, or int[ns][] */
+    char hint_ns[96] = "";
+    bool hint_real = false;
+    if (C->unit_hint) {
+        char base[160];
+        snprintf(base, sizeof base, "%s", C->unit_hint);
+        char *cut = strpbrk(base, "?[");
+        if (cut)
+            *cut = 0;
+        if (!quantity_class_name(base, hint_ns, sizeof hint_ns, &hint_real))
+            hint_ns[0] = 0;
+    }
+    UnitNs *wanted = hint_ns[0] ? unit_namespace(C, hint_ns) : NULL;
+    if (!ns && wanted && unit_slot(wanted, unit) >= 0)
+        ns = wanted;
+    if (!ns) {
+        UnitNs *found[2] = {NULL, NULL};
+        int n = 0;
+        for (int i = 0; i < C->prog->nunitns; i++)
+            if (unit_slot(&C->prog->unitns[i], unit) >= 0 && n < 2)
+                found[n++] = &C->prog->unitns[i];
+        if (!n)
+            cfail(C, e->line, "unknown unit '%s' after %s%s", unit, e->args.items[0]->text,
+                  C->prog->nunitns ? "" : "; declare units with unitns and unit, such as `unitns length for int, "
+                                          "float` and `unit length.m = 1`");
+        if (n > 1)
+            cfail(C, e->line, "unit '%s' is ambiguous: %s and %s both have it; write %s%s.%s", unit, found[0]->name,
+                  found[1]->name, e->args.items[0]->text, found[0]->name, unit);
+        ns = found[0];
+    }
+    Node *number = e->args.items[0];
+    bool real = number->kind == N_REAL || !ns->integer || (wanted == ns && hint_real);
+    if (real && !ns->real)
+        cfail(C, e->line, "int[%s] cannot hold %s; declare unitns %s for int, float", ns->name, number->text,
+              ns->name);
+    char cls[160];
+    snprintf(cls, sizeof cls, "__fwu_%s__%s", ns->name, real ? "double" : "int");
+    Node *call = synth(C, N_CALL, "", e);
+    nl_push(C->arena, &call->args, synth(C, N_NAME, arena_strndup(C->arena, cls, strlen(cls)), e));
+    Node *amount = number;
+    if (real && number->kind == N_INT) {
+        char text[96];
+        snprintf(text, sizeof text, "%s.0", number->text);
+        amount = synth(C, N_REAL, arena_strndup(C->arena, text, strlen(text)), e);
+    }
+    nl_push(C->arena, &call->args, amount);
+    char index[16];
+    snprintf(index, sizeof index, "%d", unit_slot(ns, unit));
+    nl_push(C->arena, &call->args, synth(C, N_INT, arena_strndup(C->arena, index, strlen(index)), e));
+    if (!member[0]) {
+        compile_expr(C, call);
+        return;
+    }
+    Node *access = synth(C, N_MEMBER, arena_strndup(C->arena, member, strlen(member)), e);
+    nl_push(C->arena, &access->args, call);
+    compile_expr(C, access);
+}
+/* `x in cm` / `x in time.min` when the right side names a unit rather than a value: the value
+ * converted to that unit (its __fwu_to_named method). */
+static const char *conversion_unit(Compiler *C, Node *target) {
+    if (!C->prog->nunitns)
+        return NULL;
+    if (target->kind == N_NAME && resolve(C, target->text).kind == R_NONE) {
+        for (int i = 0; i < C->prog->nunitns; i++)
+            if (unit_slot(&C->prog->unitns[i], target->text) >= 0)
+                return target->text;
+        return NULL;
+    }
+    if (target->kind == N_MEMBER && !target->grouped && target->args.items[0]->kind == N_NAME) {
+        UnitNs *ns = unit_namespace(C, target->args.items[0]->text);
+        Resolved r = resolve(C, target->args.items[0]->text);
+        if (ns && (r.kind == R_NONE || (r.kind == R_CONST && IS_OBJT(r.value, OBJ_MODULE)))) {
+            if (unit_slot(ns, target->text) < 0)
+                cfail(C, target->line, "unit namespace '%s' has no unit '%s'", ns->name, target->text);
+            return target->text;
+        }
+    }
+    return NULL;
+}
+
 static void compile_expr(Compiler *C, Node *e) {
     int saved_line = C->line, saved_col = C->col;
     C->line = e->line;
@@ -899,6 +1026,9 @@ static void compile_expr(Compiler *C, Node *e) {
     case N_CALL:
         compile_call(C, e);
         break;
+    case N_UNITLIT:
+        compile_quantity(C, e);
+        break;
     case N_INDEX: {
         Node *key = e->args.items[1];
         compile_expr(C, e->args.items[0]);
@@ -937,6 +1067,16 @@ static void compile_expr(Compiler *C, Node *e) {
             int j = emit_jump(C, OP_JUMP_NOT_NULL);
             compile_expr(C, e->args.items[1]);
             patch_jump(C, j);
+            break;
+        }
+        const char *unit = !strcmp(op, "in") ? conversion_unit(C, e->args.items[1]) : NULL;
+        if (unit) {
+            Node *call = synth(C, N_CALL, "", e);
+            Node *method = synth(C, N_MEMBER, "__fwu_to_named", e);
+            nl_push(C->arena, &method->args, e->args.items[0]);
+            nl_push(C->arena, &call->args, method);
+            nl_push(C->arena, &call->args, synth(C, N_STRING, unit, e));
+            compile_call(C, call);
             break;
         }
         compile_expr(C, e->args.items[0]);
@@ -1565,8 +1705,11 @@ static void compile_stmt(Compiler *C, Node *s) {
     case S_DECLARE: {
         Value type = s->type ? make_type(C, s->type) : val_null();
         bool is_const = s->op && !strcmp(s->op, "const");
+        const char *hint = C->unit_hint;
+        C->unit_hint = s->type;
         if (!compile_cast_with_type(C, s->expr, type))
             compile_expr(C, s->expr);
+        C->unit_hint = hint;
         if (IS_OBJ(type))
             emit_coerce(C, type, s->name);
         if (fs->is_script && fs->scope_depth == 0) {
@@ -1642,7 +1785,7 @@ static void compile_stmt(Compiler *C, Node *s) {
         compile_expr(C, s->expr);
         if (s->target) {
             compile_expr(C, s->target);
-            emit(C, OP_THROW_NAMED);
+            emit(C, s->op && !strcmp(s->op, "with") ? OP_THROW_WITH : OP_THROW_NAMED);
         } else
             emit(C, OP_THROW);
         break;

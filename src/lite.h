@@ -635,6 +635,8 @@ bool vm_get_member(VM *vm, Value obj, ObjString *name, Value *out);
 bool vm_is_instance(ObjClass *klass, ObjClass *of);
 Value vm_find_method(ObjClass *klass, ObjString *name);
 bool vm_coerce(VM *vm, Value v, ObjTypeDesc *t, Value *out, const char *what);
+/* The unit namespace of a hidden quantity class (__fwu_<ns>__int or __fwu_<ns>__double; lower.c). */
+bool quantity_class_name(const char *name, char *ns, size_t nscap, bool *real);
 bool vm_type_test(VM *vm, Value v, ObjTypeDesc *t);
 bool vm_cast(VM *vm, ObjTypeDesc *t, Value v, Value *out);
 ObjString *error_type_name(VM *vm, Value err);

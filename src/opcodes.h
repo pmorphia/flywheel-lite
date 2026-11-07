@@ -73,6 +73,7 @@
     X(OP_POP_HANDLER)                                                                             \
     X(OP_THROW)                                                                                   \
     X(OP_THROW_NAMED)    /* [name message] */                                                     \
+    X(OP_THROW_WITH)     /* [subject message]: throw X with "message" */                          \
     X(OP_CATCH_MATCH)    /* u16 type-name const: [err] -> [err bool] */                           \
     X(OP_FOR_PREP)       /* u8 slot, u8 names */                                                  \
     X(OP_FOR_NEXT)       /* u8 slot, u8 names, u16 exit */                                        \

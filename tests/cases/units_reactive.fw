@@ -1,0 +1,39 @@
+import "lib/physics.fw"
+import time
+
+# A unit namespace may share its name with an imported module.
+unitns time for int, float
+unit time.s = 1
+unit time.min = 60
+unit time.ms = 1/1000
+
+print physics.trip(2)
+int[time] wait = 1500ms
+print wait in time.s, wait in s, time.unix() > 0
+print [1s, 2min] , {1s: "one"}[1000ms]
+
+reactive int[time] elapsed = 0s
+computed float[time] remaining = 10min - elapsed
+when remaining <= 1min do
+    print "almost done:", remaining in s, "left"
+end
+for step in [3min, 5min, 1min, 30s] do
+    elapsed += step
+end
+print elapsed, remaining, type(remaining), unit(elapsed), unitns(elapsed)
+
+reactive bool ready/waiting = false
+when ready do
+    print "ready after", elapsed
+end
+waiting = false
+print waiting
+
+error Timeout(int[time] after)
+try
+    throw Timeout(elapsed) with "too slow"
+catch Timeout t
+    print t.after, t.message
+catch e
+    print "unexpected", e.name
+end

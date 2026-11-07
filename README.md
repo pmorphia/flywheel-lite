@@ -87,7 +87,10 @@ fresh per-iteration loop bindings, classes with generated constructors and `init
 and `super`, interfaces, operator methods, `to_string`, `hash`/`equals` keys, the iterator
 protocol, enums and enums with data, `match` with every pattern form (values, ranges, enum
 members, types, `ok`/`error`, destructuring, guards), destructuring declarations, generics,
-nullable values, `try`/`catch`/`finally`/`then`, named errors, `assert`, `defer`, `Result`,
+nullable values, `try`/`catch`/`finally`/`then`, named errors, declared error types (`error Name(...)`,
+`throw Name with "message"`), `assert`, `defer`, `Result`, reactive variables (`reactive`, `when`,
+`computed`), negated bool aliases (`bool on/off`), units (`unitns`, `unit`, `unitconv`, quantity
+literals such as `100m`, `x in cm`, `type`/`unit`/`unitns`),
 arrays/tuples/maps/sets with their methods, `freeze`, casts and conversions, markup literals,
 components, element families, and local, path, package (`.flywheel-modules`) and library-module
 imports with aliases, wildcards and `private`.
@@ -112,6 +115,10 @@ there is no static type checker. So:
 - Programs the compiler rejects can run under Flywheel Lite until they reach the problem: type
   mismatches surface as `TypeError` when executed, a non-exhaustive `match` raises `MatchError`
   only if no case applies, and missing returns yield `null`. Use `flywheel check` to validate.
+- Unit mistakes the compiler rejects (`100m + 10s`, a plain number where a quantity is
+  declared, a product with no `unitconv`) raise `TypeError` when executed, with the compiler's
+  wording. Quantity operators dispatch at run time to the hidden unit classes.
+- The compiler's warning for a `catch "Name"` that nothing throws is not reported.
 - `private` and `readonly` class members are not enforced (module-level `private` and `const` are).
 - `float` values are stored as `double`; `u64` values above the signed 64-bit range are not
   supported; `typeof` cannot name generic instances (`Box`, not `Box<int>`) or function types.
@@ -131,7 +138,7 @@ there is no static type checker. So:
   are skipped and counted);
 - Flywheel Lite's own cases in `tests/cases`, whose expected output was produced by the Flywheel compiler.
 
-Current result on Linux: 174 of 183 pass; the 9 others are the known differences above.
+Current result on Linux: 197 of 206 pass; the 9 others are the known differences above.
 `LITE_GC_STRESS=1` collects at every safepoint, which together with `make debug` checks that
 the runtime roots every live value.
 
@@ -149,6 +156,7 @@ starting quickly and running anywhere.
 | File | Contents |
 |---|---|
 | `src/lexer.c`, `src/parser.c`, `src/front.h` | tokens and AST, ported from the compiler's front end |
+| `src/lower.c` | unit namespaces and reactive variables lowered to ordinary code (as in the compiler) |
 | `src/compiler.c`, `src/opcodes.h` | scope resolution and bytecode generation |
 | `src/vm.c` | the interpreter loop, calls, errors, classes, coercion, module loading |
 | `src/value.c`, `src/memory.c` | values, maps, formatting, the garbage collector |

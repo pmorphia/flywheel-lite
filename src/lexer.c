@@ -407,7 +407,11 @@ static bool lex_text(Arena *arena, const char *src, size_t len, TokenList *out, 
                 while (e < n && isdigit((unsigned char)s[e]))
                     e++;
             }
-            if (e < n && (s[e] == 'e' || s[e] == 'E')) {
+            /* An exponent needs digits (1e5, 2E-3); otherwise `e` starts a unit (5eV). */
+            size_t d = e + 1;
+            if (d < n && (s[d] == '+' || s[d] == '-'))
+                d++;
+            if (e < n && (s[e] == 'e' || s[e] == 'E') && d < n && isdigit((unsigned char)s[d])) {
                 real = true;
                 e++;
                 if (e < n && (s[e] == '+' || s[e] == '-'))

@@ -52,6 +52,7 @@ typedef enum {
     N_LAMBDA,
     N_ELEMENT,
     N_JSON,
+    N_UNITLIT, /* 100m: text is the unit (or ns.unit), args[0] the number */
     /* statements */
     S_EXPR,
     S_DECLARE,
@@ -66,7 +67,8 @@ typedef enum {
     S_TRY,
     S_MATCH,
     S_DEFER,
-    S_DESTRUCTURE
+    S_DESTRUCTURE,
+    S_WHEN /* lowered by lower.c before compilation */
 } NodeKind;
 
 typedef struct Param {
@@ -99,6 +101,7 @@ struct Node {
     FuncDecl *fn; /* lambda */
     /* statements */
     const char *name, *type, *op;
+    const char *alias; /* declare: negated alias of a bool (`bool on/off = true` names off) */
     Node *expr, *target;
     NodeList body, other, finalizer;
     NodeList *catches;
@@ -148,6 +151,23 @@ typedef struct {
     int line;
 } ComponentDecl;
 
+/* `unitns time for int, float` with its `unit time.s = 1` declarations (see lower.c). */
+typedef struct {
+    const char *name;
+    int line, col;
+    bool integer, real;
+    const char *real_spelling;
+    const char **units, **factors;
+    int *unit_lines;
+    int nunits, capunits;
+} UnitNs;
+/* `unitconv 1metric_length.m / 1time.s = 1metric_speed.mps` */
+typedef struct {
+    int line, col;
+    const char *op;
+    const char *amounts[3], *namespaces[3], *units[3];
+} UnitConv;
+
 typedef struct {
     ImportDecl *imports;
     int nimports;
@@ -165,6 +185,10 @@ typedef struct {
     const char **privates;
     int nprivates;
     bool html, svg;
+    UnitNs *unitns;
+    int nunitns, capunitns;
+    UnitConv *unitconvs;
+    int nunitconvs, capunitconvs;
 } Program;
 
 typedef struct {
@@ -183,6 +207,13 @@ typedef struct {
 } Parser;
 
 void nl_push(Arena *a, NodeList *l, Node *n);
+void nl_insert(Arena *a, NodeList *l, int at, Node *n);
 bool parse_program(Arena *arena, const char *src, size_t len, Program *out, CompileError *err);
+TB_NORETURN void parser_fail(Parser *P, int line, int col, const char *fmt, ...);
+/* lower.c: unit namespaces become hidden quantity classes and tables; reactive variables,
+ * `when`, `computed`, and negated aliases become ordinary declarations and closures. */
+void lower_units(Parser *P, Program *prog);
+void lower_reactive(Parser *P, Program *prog);
+
 
 #endif

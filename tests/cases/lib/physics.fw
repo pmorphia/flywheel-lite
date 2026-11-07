@@ -1,0 +1,13 @@
+# Units declared in a library module are used inside it; callers get strings and numbers.
+unitns distance for int, float
+unit distance.m = 1
+unit distance.km = 1000
+
+function trip(int legs) returns string
+    int[distance] total = 0m
+    for i in 1..legs do
+        total += 2km
+        total += 500m
+    end
+    return string(total) + " = " + string(total in km)
+end

@@ -510,6 +510,53 @@ NATIVE(n_cast) {
 
 /* ---------------------------------------------------------------- errors and Result */
 
+/* ---------------------------------------------------------------- type(x), unit(x), unitns(x) */
+
+static bool quantity_method(VM *vm, Value v, const char *method, Value *out, bool *found) {
+    *found = false;
+    char ns[96];
+    bool real;
+    if (!IS_OBJT(v, OBJ_INSTANCE) || !quantity_class_name(AS_INSTANCE(v)->klass->name->chars, ns, sizeof ns, &real))
+        return true;
+    Value m = vm_find_method(AS_INSTANCE(v)->klass, str_intern_c(vm, method));
+    if (IS_NULL(m))
+        return true;
+    *found = true;
+    ObjBound *bound = new_bound(vm, v, m);
+    push_root(vm, val_obj(bound));
+    bool ok = vm_call(vm, val_obj(bound), 0, NULL, out);
+    pop_root(vm, 1);
+    return ok;
+}
+NATIVE(n_type) {
+    bool found;
+    if (!quantity_method(vm, args[0], "__fwu_type", out, &found))
+        return false;
+    if (found)
+        return true;
+    Buf b;
+    buf_init(&b);
+    type_name_of(vm, args[0], &b);
+    *out = val_obj(str_copy(vm, b.data ? b.data : "", b.len));
+    buf_free(&b);
+    return true;
+}
+static bool quantity_info(VM *vm, Value v, const char *method, const char *what, Value *out) {
+    bool found;
+    if (!quantity_method(vm, v, method, out, &found))
+        return false;
+    if (found)
+        return true;
+    Buf b;
+    buf_init(&b);
+    type_name_of(vm, v, &b);
+    bool r = vm_throw(vm, "TypeError", "%s(x) needs a quantity such as 15s, got %s", what, b.data ? b.data : "value");
+    buf_free(&b);
+    return r;
+}
+NATIVE(n_unit) { return quantity_info(vm, args[0], "__fwu_unit_name", "unit", out); }
+NATIVE(n_unitns) { return quantity_info(vm, args[0], "__fwu_ns", "unitns", out); }
+
 NATIVE(n_error_ctor) {
     ObjString *type = AS_STRING(vm->desc_args[0]);
     ObjString *msg;
@@ -2058,6 +2105,14 @@ void lib_core_init(VM *vm) {
         n->data = val_obj(str_intern_c(vm, errors[i]));
         table_set(vm, &vm->builtins, str_intern_c(vm, errors[i]), val_obj(n));
     }
+    /* type(x), unit(x), unitns(x); quantities answer through their hidden class (lower.c) */
+    static const struct {
+        const char *name;
+        NativeFn fn;
+    } introspection[] = {{"type", n_type}, {"unit", n_unit}, {"unitns", n_unitns}};
+    for (size_t i = 0; i < sizeof introspection / sizeof introspection[0]; i++)
+        table_set(vm, &vm->builtins, str_intern_c(vm, introspection[i].name),
+                  val_obj(new_native(vm, introspection[i].name, introspection[i].fn, 1, 1)));
     ObjModule *result = new_module(vm, str_intern_c(vm, "Result"));
     result->native = true;
     module_set_native(vm, result, "ok", n_result_ok, 0, 1);

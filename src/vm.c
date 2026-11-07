@@ -96,7 +96,11 @@ void vm_report_error(VM *vm, Value err) {
     ObjString *t = error_type_name(vm, err);
     push_root(vm, val_obj(t));
     ObjString *m = error_message(vm, err);
-    fprintf(stderr, "Flywheel runtime error: %s: %s\n", t->chars, m->len ? m->chars : "exception");
+    Value idx;
+    if (!m->len && IS_OBJT(err, OBJ_INSTANCE) && table_get(&AS_INSTANCE(err)->klass->field_index, vm->s_message, &idx))
+        fprintf(stderr, "Flywheel runtime error: %s\n", t->chars); /* `throw BadInput` without a message */
+    else
+        fprintf(stderr, "Flywheel runtime error: %s: %s\n", t->chars, m->len ? m->chars : "exception");
     pop_root(vm, 1);
     if (vm->trace[0] && getenv("LITE_TRACE") && strcmp(getenv("LITE_TRACE"), "0") != 0)
         fputs(vm->trace, stderr);
@@ -375,7 +379,16 @@ static const char *tname(ObjTypeDesc *t) {
     case TY_FRAGMENT: return "fragment";
     case TY_JSON: return "json.value";
     case TY_NAMED:
-    case TY_ERROR: return t->name ? t->name->chars : "value";
+    case TY_ERROR: {
+        static char shown[128]; /* int[time] for a hidden quantity class */
+        char ns[96];
+        bool real;
+        if (t->name && quantity_class_name(t->name->chars, ns, sizeof ns, &real)) {
+            snprintf(shown, sizeof shown, "%s[%s]", real ? "float" : "int", ns);
+            return shown;
+        }
+        return t->name ? t->name->chars : "value";
+    }
     default: return "value";
     }
 }
@@ -387,6 +400,164 @@ static bool mismatch(VM *vm, Value v, ObjTypeDesc *t, const char *what) {
                       what && what[0] ? " for " : "", what ? what : "");
     buf_free(&b);
     return r;
+}
+
+/* ---------------------------------------------------------------- quantities
+ * Values of unit types (int[time], float[time]) are instances of the hidden classes that
+ * lower.c generates; operators on them dispatch here at run time to the classes' __fwu_ methods,
+ * matching the compiler's static rules (same-namespace + - and comparisons, scaling by numbers,
+ * unitconv relations between namespaces). */
+typedef struct {
+    char ns[96];
+    bool real;
+} QuantityKind;
+static bool quantity_of(Value v, QuantityKind *q) {
+    return IS_OBJT(v, OBJ_INSTANCE) &&
+           quantity_class_name(AS_INSTANCE(v)->klass->name->chars, q->ns, sizeof q->ns, &q->real);
+}
+static void quantity_display(Value v, char *out, size_t n) {
+    QuantityKind q;
+    if (quantity_of(v, &q)) {
+        snprintf(out, n, "%s[%s]", q.real ? "float" : "int", q.ns);
+        return;
+    }
+    Buf b;
+    buf_init(&b);
+    type_name_of(NULL, v, &b);
+    snprintf(out, n, "%s", b.data ? b.data : "value");
+    buf_free(&b);
+}
+static bool quantity_call(VM *vm, Value recv, const char *method, int argc, Value *args, Value *out) {
+    Value m = vm_find_method(AS_INSTANCE(recv)->klass, str_intern_c(vm, method));
+    if (IS_NULL(m))
+        return vm_throw(vm, "TypeError", "quantity has no %s", method);
+    push_root(vm, recv);
+    ObjBound *bound = new_bound(vm, recv, m);
+    push_root(vm, val_obj(bound));
+    bool ok = vm_call(vm, val_obj(bound), argc, args, out);
+    pop_root(vm, 2);
+    return ok;
+}
+/* int[ns] -> float[ns] */
+static bool quantity_real(VM *vm, Value v, const char *op, Value *out) {
+    QuantityKind q;
+    *out = v;
+    if (!quantity_of(v, &q) || q.real)
+        return true;
+    if (IS_NULL(vm_find_method(AS_INSTANCE(v)->klass, str_intern_c(vm, "__fwu_float"))))
+        return vm_throw(vm, "TypeError", "%s with int[%s] needs floating point; declare unitns %s for int, float",
+                        op, q.ns, q.ns);
+    return quantity_call(vm, v, "__fwu_float", 0, NULL, out);
+}
+static bool same_namespace(Value a, Value b) {
+    return AS_INSTANCE(a)->klass->module == AS_INSTANCE(b)->klass->module;
+}
+/* op is one of + - * / // % == != < <= > >=; comparisons produce a bool. */
+static bool quantity_binary(VM *vm, const char *op, Value a, Value b, Value *out) {
+    QuantityKind qa, qb;
+    bool isa = quantity_of(a, &qa), isb = quantity_of(b, &qb);
+    char da[128], db[128];
+    quantity_display(a, da, sizeof da);
+    quantity_display(b, db, sizeof db);
+    bool comparison = !strcmp(op, "==") || !strcmp(op, "!=") || op[0] == '<' || op[0] == '>';
+    Value x = a, y = b, r;
+    if (isa && isb) {
+        bool same = !strcmp(qa.ns, qb.ns) && same_namespace(a, b);
+        if (same && (!strcmp(op, "+") || !strcmp(op, "-") || !strcmp(op, "/") || comparison)) {
+            if (qa.real != qb.real) {
+                if (!quantity_real(vm, a, op, &x))
+                    return false;
+                push_root(vm, x);
+                bool ok = quantity_real(vm, b, op, &y);
+                pop_root(vm, 1);
+                if (!ok)
+                    return false;
+            }
+            push_root(vm, x);
+            push_root(vm, y);
+            const char *method = !strcmp(op, "+") ? "__fwu_add" : !strcmp(op, "-") ? "__fwu_sub"
+                                 : !strcmp(op, "/")  ? "__fwu_ratio"
+                                                     : "__fwu_cmp";
+            bool ok = quantity_call(vm, x, method, 1, &y, &r);
+            pop_root(vm, 2);
+            if (!ok)
+                return false;
+            if (!comparison) {
+                *out = r;
+                return true;
+            }
+            int64_t c = r.as.i;
+            bool v = !strcmp(op, "==") ? c == 0 : !strcmp(op, "!=") ? c != 0 : !strcmp(op, "<") ? c < 0
+                     : !strcmp(op, "<=")                                     ? c <= 0
+                     : !strcmp(op, ">")                                      ? c > 0
+                                                                             : c >= 0;
+            *out = val_bool(v);
+            return true;
+        }
+        if (!strcmp(op, "==") || !strcmp(op, "!=")) {
+            *out = val_bool(!strcmp(op, "!="));
+            return true;
+        }
+        if (!strcmp(op, "*") || !strcmp(op, "/")) {
+            char method[160];
+            snprintf(method, sizeof method, "__fwu_%s__%s", op[0] == '*' ? "mul" : "div", qb.ns);
+            if (!quantity_real(vm, a, op, &x))
+                return false;
+            push_root(vm, x);
+            bool ok = quantity_real(vm, b, op, &y);
+            push_root(vm, y);
+            if (ok && IS_NULL(vm_find_method(AS_INSTANCE(x)->klass, str_intern_c(vm, method))))
+                ok = vm_throw(vm, "TypeError",
+                              "no unitconv relates %s %s %s; declare one, such as unitconv 1%s.unit %s 1%s.unit = "
+                              "1other.unit",
+                              qa.ns, op, qb.ns, qa.ns, op, qb.ns);
+            ok = ok && quantity_call(vm, x, method, 1, &y, out);
+            pop_root(vm, 2);
+            return ok;
+        }
+        if (!same)
+            return vm_throw(vm, "TypeError", "cannot use %s on %s and %s: they are in different unit namespaces", op,
+                            da, db);
+        return vm_throw(vm, "TypeError", "operator %s is not defined for quantities; use + - * / and comparisons",
+                        op);
+    }
+    Value q = isa ? a : b, n = isa ? b : a;
+    QuantityKind k = isa ? qa : qb;
+    if (!IS_NUM(n)) {
+        if (!strcmp(op, "==") || !strcmp(op, "!=")) {
+            *out = val_bool(!strcmp(op, "!="));
+            return true;
+        }
+        return vm_throw(vm, "TypeError", "cannot use %s on %s and %s", op, da, db);
+    }
+    if (!strcmp(op, "*")) {
+        if (!k.real && IS_INT(n))
+            return quantity_call(vm, q, "__fwu_scale", 1, &n, out);
+        if (!quantity_real(vm, q, op, &x))
+            return false;
+        Value d = val_double(AS_NUM(n));
+        push_root(vm, x);
+        bool ok = quantity_call(vm, x, "__fwu_scale", 1, &d, out);
+        pop_root(vm, 1);
+        return ok;
+    }
+    if (isa && !strcmp(op, "/")) {
+        if (!quantity_real(vm, q, op, &x))
+            return false;
+        Value d = val_double(AS_NUM(n));
+        push_root(vm, x);
+        bool ok = quantity_call(vm, x, "__fwu_divide", 1, &d, out);
+        pop_root(vm, 1);
+        return ok;
+    }
+    if (isa && !strcmp(op, "//")) {
+        if (k.real || !IS_INT(n))
+            return vm_throw(vm, "TypeError", "// divides an int quantity by an int; use / for %s and %s", da, db);
+        return quantity_call(vm, q, "__fwu_floordiv", 1, &n, out);
+    }
+    if (!strcmp(op, "+") || !strcmp(op, "-") || comparison)
+        return vm_throw(vm, "TypeError", "cannot use %s on %s and %s; give the number a unit", op, da, db);
+    return vm_throw(vm, "TypeError", "cannot use %s on %s and %s", op, da, db);
 }
 
 bool vm_type_test(VM *vm, Value v, ObjTypeDesc *t) {
@@ -581,6 +752,11 @@ bool vm_coerce(VM *vm, Value v, ObjTypeDesc *t, Value *out, const char *what) {
         return true;
     case TY_NAMED: {
         Value k = vm_resolve_named(vm, t);
+        QuantityKind from, to;
+        if (IS_OBJT(k, OBJ_CLASS) && quantity_of(v, &from) && !from.real &&
+            quantity_class_name(AS_CLASS(k)->name->chars, to.ns, sizeof to.ns, &to.real) && to.real &&
+            !strcmp(from.ns, to.ns) && AS_INSTANCE(v)->klass->module == AS_CLASS(k)->module)
+            return quantity_real(vm, v, "conversion", out); /* int[time] widens to float[time] */
         if (IS_OBJT(k, OBJ_CLASS) || IS_OBJT(k, OBJ_ENUM)) {
             if (!vm_type_test(vm, v, t))
                 return mismatch(vm, v, t, what);
@@ -820,6 +996,11 @@ bool vm_get_member(VM *vm, Value obj, ObjString *name, Value *out) {
                 *out = val_obj(new_bound(vm, obj, m));
                 return true;
             }
+            /* every error has a .name: an instance caught by a catch-all reports its class */
+            if (name == vm->s_name) {
+                *out = val_obj(in->klass->name);
+                return true;
+            }
             return vm_throw(vm, "TypeError", "%s has no member '%s'", in->klass->name->chars, name->chars);
         }
         case OBJ_CLASS:
@@ -1016,6 +1197,11 @@ static bool arith(VM *vm, uint8_t op, Value a, Value b, Value *out) {
     }
     static const char *names[] = {"+", "-", "*", "/", "//", "%"};
     const char *opname = names[op - OP_ADD];
+    {
+        QuantityKind qa, qb;
+        if (quantity_of(a, &qa) || quantity_of(b, &qb))
+            return quantity_binary(vm, opname, a, b, out);
+    }
     if (op == OP_ADD) {
         if (IS_STRING(a) && IS_STRING(b)) {
             *out = val_obj(concat(vm, AS_CSTR(a), (size_t)AS_STRING(a)->len, AS_CSTR(b), (size_t)AS_STRING(b)->len));
@@ -1098,6 +1284,21 @@ static bool arith(VM *vm, uint8_t op, Value a, Value b, Value *out) {
 }
 
 static bool compare_op(VM *vm, uint8_t op, Value a, Value b, bool *out) {
+    {
+        QuantityKind qa, qb;
+        if (quantity_of(a, &qa) || quantity_of(b, &qb)) {
+            static const char *names[] = {"==", "!=", "<", "<=", ">", ">="};
+            const char *name = op == OP_EQ ? names[0] : op == OP_NE ? names[1] : op == OP_LT ? names[2]
+                               : op == OP_LE ? names[3]
+                               : op == OP_GT ? names[4]
+                                             : names[5];
+            Value r;
+            if (!quantity_binary(vm, name, a, b, &r))
+                return false;
+            *out = r.as.b;
+            return true;
+        }
+    }
     if (IS_INT(a) && IS_INT(b)) {
         int64_t x = a.as.i, y = b.as.i;
         switch (op) {
@@ -2426,6 +2627,15 @@ static RunResult run(VM *vm, int base) {
     CASE(OP_THROW) {
         Value v = POP();
         SYNC();
+        if (IS_OBJT(v, OBJ_CLASS)) {
+            /* `throw BadInput`: a class throws a new instance (fields keep their defaults) */
+            PUSH(v);
+            Value made;
+            if (!vm_call(vm, v, 0, NULL, &made))
+                THROW();
+            vm->sp--;
+            v = made;
+        }
         if (IS_NULL(v) || IS_UNDEF(v) || IS_OBJT(v, OBJ_CLOSURE) || IS_OBJT(v, OBJ_NATIVE) || IS_OBJT(v, OBJ_BOUND)) {
             vm_throw(vm, "TypeError", "null and functions cannot be thrown");
             THROW();
@@ -2446,6 +2656,51 @@ static RunResult run(VM *vm, int base) {
         ObjError *e = new_error(vm, str_intern(vm, AS_CSTR(name), (size_t)AS_STRING(name)->len), m);
         vm->sp -= 2;
         vm_throw_value(vm, val_obj(e));
+        THROW();
+    }
+    CASE(OP_THROW_WITH) {
+        /* throw X with message: X names an error by string, or is a builtin error type (called
+         * with the message), a class (constructed), or an instance; instances get the message
+         * in their `message` field. */
+        Value msg = PEEK(0), subject = PEEK(1);
+        SYNC();
+        if (!IS_STRING(msg)) {
+            vm_throw(vm, "TypeError", "throw ... with expects a string message");
+            THROW();
+        }
+        Value thrown = subject;
+        if (IS_STRING(subject)) {
+            ObjError *e = new_error(vm, str_intern(vm, AS_CSTR(subject), (size_t)AS_STRING(subject)->len),
+                                    AS_STRING(msg));
+            vm->sp -= 2;
+            vm_throw_value(vm, val_obj(e));
+            THROW();
+        }
+        if (IS_OBJT(subject, OBJ_NATIVE)) {
+            if (!vm_call(vm, subject, 1, &msg, &thrown))
+                THROW();
+        } else if (IS_OBJT(subject, OBJ_CLASS)) {
+            if (!vm_call(vm, subject, 0, NULL, &thrown))
+                THROW();
+        }
+        if (IS_OBJT(thrown, OBJ_INSTANCE)) {
+            ObjInstance *in = AS_INSTANCE(thrown);
+            Value idx;
+            if (!table_get(&in->klass->field_index, vm->s_message, &idx)) {
+                vm_throw(vm, "TypeError",
+                         "throw ... with needs an error type with a message field; declare one with `error %s`",
+                         in->klass->name->chars);
+                THROW();
+            }
+            in->fields[idx.as.i] = msg;
+        } else if (IS_OBJT(thrown, OBJ_ERROR)) {
+            ((ObjError *)AS_OBJ(thrown))->message = AS_STRING(msg);
+        } else {
+            vm_throw(vm, "TypeError", "throw ... with expects an error type or a string name");
+            THROW();
+        }
+        vm->sp -= 2;
+        vm_throw_value(vm, thrown);
         THROW();
     }
     CASE(OP_CATCH_MATCH) {
