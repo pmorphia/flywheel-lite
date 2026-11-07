@@ -5,6 +5,9 @@ not a new language: it reads the same source as the Flywheel compiler and aims t
 output. Where the compiler builds a native executable through LLVM, Flywheel Lite compiles a file to
 bytecode in memory and runs it straight away.
 
+Flywheel Lite is currently in its **beta** phase: version **2.1 (beta-1)**, following Flywheel
+2.11 (`flywheel-lite --version`).
+
 Why it exists:
 
 1. **macOS support.** Flywheel Lite is portable C11 with no platform toolchain requirements, so it runs
