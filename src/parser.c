@@ -1240,8 +1240,16 @@ static void run_body(Parser *P, NodeList *out) {
     Token *nx = peek(P, 0);
     if (nx->kind == T_OP && in_list(nx, assign_ops))
         pfail(P, RUN_USAGE "; assignments need 'do' ... 'end'%s", "");
-    if (s->target->kind != N_CALL)
+    /* A bare name or member calls it with no arguments, as a statement does: `run main_loop`. */
+    Node *e = s->target;
+    if (e->kind != N_CALL && !((e->kind == N_NAME || e->kind == N_MEMBER) && !e->grouped))
         pfail_at(P, t->line, t->col, RUN_USAGE "%s", "");
+    if (e->kind != N_CALL) {
+        Node *call = node(P, N_CALL, "", e->line, e->col);
+        nl_push(P->arena, &call->args, e);
+        call->outer = true;
+        s->target = call;
+    }
     nl_push(P->arena, out, s);
 }
 static void spec_run_condition(Parser *P, void *ctx) {
