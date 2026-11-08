@@ -177,6 +177,11 @@ def main():
                 ("check_error", ["check", "-s", "print 1 +"], 1, ""),
                 ("unknown_option", ["run", "--bogus", "x.fw"], 2, ""),
                 ("compiler_only", ["build", "x.fw"], 2, ""),
+                ("alias_run", ["r", "-s", "print 6 * 7"], 0, "42\n"),
+                ("alias_check", ["c", "-s", "print 1"], 0, ""),
+                ("alias_compiler_only", ["f", "x.fw"], 2, ""),
+                ("alias_version", ["v"], 0, None),
+                ("alias_help", ["h"], 0, None),
                 ("test", ["test", str(suite_dir)], 1,
                  f"{suite_dir / 'nested' / 'math_test.fw'}\n"
                  "  FAIL test_bad: assertion failed: product: expected 5, got 4\n  ok   test_good\n"

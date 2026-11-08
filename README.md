@@ -5,8 +5,8 @@ not a new language: it reads the same source as the Flywheel compiler and aims t
 output. Where the compiler builds a native executable through LLVM, Flywheel Lite compiles a file to
 bytecode in memory and runs it straight away.
 
-Flywheel Lite is currently in its **beta** phase: version **2.4 (beta-4)**, following Flywheel
-2.14 (`flywheel-lite --version`).
+Flywheel Lite is currently in its **beta** phase: version **2.5 (beta-5)**, following Flywheel
+2.15 (`flywheel-lite --version`).
 
 Why it exists:
 
@@ -71,11 +71,15 @@ The command line follows the Flywheel compiler's:
 `fwl` is a short alias for `flywheel-lite` (`fwl hello.fw`, `fwl repl`); `make install` and
 `cmake --install` create it next to the executable.
 
+Commands have the compiler's short aliases: `r` (run), `c` (check), `e` (export), `db` (debug),
+`t` (test), and `u` (update); `help`/`h`/`-h`/`--help` print the usage and
+`version`/`v`/`-v`/`--version` the version (`fwl v`).
+
 SOURCE is a `.fw`/`.fly` path, or `-` for standard input. `-s CODE`, `--source CODE`, or
 `--source=CODE` in place of SOURCE runs code from the command line (diagnostics name it
 `<source>`); like every option, it can appear anywhere before `--`. `-O0`..`-O3` and `-g` are
 accepted and ignored, so compiler command lines work unchanged. `build`, `desktop`, `serve`,
-`fmt`, `doc`, `lsp`, and `test --coverage`/`--race` need the Flywheel compiler and say so.
+`format` (`fmt`), `doc`, `lsp`, and `test --coverage`/`--race` need the Flywheel compiler and say so.
 
 Errors use the compiler's formats: `file:line:col: error: ...` for compile errors and
 `Flywheel runtime error: Type: message` (plus the failing location) for uncaught errors, with exit

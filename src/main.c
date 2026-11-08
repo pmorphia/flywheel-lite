@@ -40,21 +40,22 @@ static char *read_path(const char *path, size_t *len) {
 }
 
 static void usage(FILE *f) {
-    fputs("Usage: flywheel-lite run SOURCE [options] [-- program arguments]\n"
+    fputs("Usage: flywheel-lite run|r SOURCE [options] [-- program arguments]\n"
           "           run on the bytecode VM\n"
-          "       flywheel-lite check SOURCE [options]\n"
+          "       flywheel-lite check|c SOURCE [options]\n"
           "           compile without running\n"
-          "       flywheel-lite export SOURCE OUTPUT [options] [program arguments]\n"
+          "       flywheel-lite export|e SOURCE OUTPUT [options] [program arguments]\n"
           "           write the returned value to OUTPUT\n"
-          "       flywheel-lite debug SOURCE [options] [-- program arguments]\n"
+          "       flywheel-lite debug|db SOURCE [options] [-- program arguments]\n"
           "           print the returned value and run time\n"
-          "       flywheel-lite test [files or directories]\n"
+          "       flywheel-lite test|t [files or directories]\n"
           "           run test_*.fw and *_test.fw files\n"
           "       flywheel-lite disasm SOURCE [options]\n"
           "           print the compiled bytecode\n"
-          "       flywheel-lite update [curl arguments]\n"
+          "       flywheel-lite update|u [curl arguments]\n"
           "           reinstall from flywheel.polymorphia.dev\n"
-          "       flywheel-lite repl | selftest | --version\n"
+          "       flywheel-lite repl | selftest\n"
+          "       flywheel-lite help|h|--help | version|v|--version\n"
           "\n"
           "SOURCE is a .fw/.fly path, or - for standard input; `flywheel-lite SOURCE [arguments]` runs it.\n"
           "Use -s CODE (--source CODE) instead of SOURCE to run code from the command line.\n"
@@ -64,7 +65,7 @@ static void usage(FILE *f) {
           "  -g               accepted for compatibility (no effect)\n"
           "  -o FILE          output file (export)\n"
           "\n"
-          "build, desktop, serve, fmt, doc, and lsp need the Flywheel compiler.\n"
+          "build (b), desktop (d), serve (s), format (fmt, f), doc, and lsp need the Flywheel compiler.\n"
           "fwl is a short alias: fwl SOURCE, fwl repl, ...\n",
           f);
 }
@@ -606,6 +607,17 @@ int main(int argc, char **argv) {
         return 2;
     }
     const char *cmd = argv[1];
+    /* Short aliases, as in the Flywheel compiler; fmt is the old name of format. */
+    static const char *aliases[][2] = {
+        {"r", "run"},    {"b", "build"},   {"c", "check"},  {"d", "desktop"}, {"s", "serve"},
+        {"e", "export"}, {"db", "debug"},  {"t", "test"},   {"f", "format"},  {"fmt", "format"},
+        {"u", "update"}, {"h", "help"},    {"v", "version"},
+    };
+    for (size_t i = 0; i < sizeof aliases / sizeof *aliases; i++)
+        if (!strcmp(cmd, aliases[i][0])) {
+            cmd = aliases[i][1];
+            break;
+        }
     if (!strcmp(cmd, "--version") || !strcmp(cmd, "-v") || !strcmp(cmd, "version")) {
         printf("flywheel-lite %s (Flywheel %s)\n", LITE_VERSION, LITE_LANGUAGE);
         return 0;
@@ -614,7 +626,7 @@ int main(int argc, char **argv) {
         usage(stdout);
         return 0;
     }
-    static const char *compiler_only[] = {"build", "desktop", "serve", "fmt", "doc", "lsp"};
+    static const char *compiler_only[] = {"build", "desktop", "serve", "format", "doc", "lsp"};
     for (size_t i = 0; i < sizeof compiler_only / sizeof *compiler_only; i++)
         if (!strcmp(cmd, compiler_only[i])) {
             fprintf(stderr, "flywheel-lite: `%s` needs the Flywheel compiler: use `flywheel %s`\n", cmd, cmd);
