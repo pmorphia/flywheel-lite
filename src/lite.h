@@ -30,8 +30,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define LITE_VERSION "2.5 (beta-5)"
-#define LITE_LANGUAGE "2.15"
+#define LITE_VERSION "2.6 (beta-6)"
+#define LITE_LANGUAGE "2.16"
 
 #if defined(__GNUC__) || defined(__clang__)
 #define TB_NORETURN __attribute__((noreturn))

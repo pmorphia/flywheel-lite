@@ -5,8 +5,8 @@ not a new language: it reads the same source as the Flywheel compiler and aims t
 output. Where the compiler builds a native executable through LLVM, Flywheel Lite compiles a file to
 bytecode in memory and runs it straight away.
 
-Flywheel Lite is currently in its **beta** phase: version **2.5 (beta-5)**, following Flywheel
-2.15 (`flywheel-lite --version`).
+Flywheel Lite is currently in its **beta** phase: version **2.6 (beta-6)**, following Flywheel
+2.16 (`flywheel-lite --version`).
 
 Why it exists:
 
