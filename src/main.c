@@ -52,6 +52,8 @@ static void usage(FILE *f) {
           "           run test_*.fw and *_test.fw files\n"
           "       flywheel-lite disasm SOURCE [options]\n"
           "           print the compiled bytecode\n"
+          "       flywheel-lite update [curl arguments]\n"
+          "           reinstall from flywheel.polymorphia.dev\n"
           "       flywheel-lite repl | selftest | --version\n"
           "\n"
           "SOURCE is a .fw/.fly path, or - for standard input; `flywheel-lite SOURCE [arguments]` runs it.\n"
@@ -621,6 +623,39 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "new") || !strcmp(cmd, "get") || !strcmp(cmd, "add") || !strcmp(cmd, "install")) {
         fprintf(stderr, "flywheel-lite: packages are managed by Pulley: use `pulley %s` (or `ppm %s`)\n", cmd, cmd);
         return 2;
+    }
+    if (!strcmp(cmd, "update")) {
+        /* curl -fsSL https://flywheel.polymorphia.dev/lite-install.sh [arguments] | bash */
+#ifndef _WIN32
+        const char *script = "curl -fsSL https://flywheel.polymorphia.dev/lite-install.sh \"$@\" | bash";
+#endif
+        fflush(stdout);
+#ifdef _WIN32
+        Buf b; /* cmd.exe runs the pipeline */
+        buf_init(&b);
+        add_str(&b, "curl -fsSL https://flywheel.polymorphia.dev/lite-install.sh");
+        for (int i = 2; i < argc; i++) {
+            add_str(&b, " \"");
+            add_str(&b, argv[i]);
+            buf_addc(&b, '"');
+        }
+        add_str(&b, " | bash");
+        int status = system(b.data);
+        return status == -1 ? 1 : status;
+#else
+        char **args = xmalloc(sizeof(char *) * (size_t)(argc + 3));
+        int n = 0;
+        args[n++] = "sh";
+        args[n++] = "-c";
+        args[n++] = (char *)script;
+        args[n++] = "sh";
+        for (int i = 2; i < argc; i++)
+            args[n++] = argv[i];
+        args[n] = NULL;
+        execvp("sh", args);
+        fprintf(stderr, "flywheel-lite: update needs sh, curl, and bash: %s\n", strerror(errno));
+        return 1;
+#endif
     }
     const char *exe_dir = exe_dir_of(argv[0]);
     if (!strcmp(cmd, "selftest")) {
