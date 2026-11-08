@@ -2747,21 +2747,6 @@ static RunResult run(VM *vm, int base) {
         vm_throw_value(vm, v);
         THROW();
     }
-    CASE(OP_THROW_NAMED) {
-        Value msg = PEEK(0), name = PEEK(1);
-        SYNC();
-        if (!IS_STRING(name)) {
-            vm_throw(vm, "TypeError", "error names must be strings");
-            THROW();
-        }
-        ObjString *m = IS_STRING(msg) ? AS_STRING(msg) : value_to_string(vm, msg);
-        if (!m)
-            THROW();
-        ObjError *e = new_error(vm, str_intern(vm, AS_CSTR(name), (size_t)AS_STRING(name)->len), m);
-        vm->sp -= 2;
-        vm_throw_value(vm, val_obj(e));
-        THROW();
-    }
     CASE(OP_THROW_WITH) {
         /* throw X with message: X names an error by string, or is a builtin error type (called
          * with the message), a class (constructed), or an instance; instances get the message

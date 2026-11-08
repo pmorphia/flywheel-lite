@@ -1859,7 +1859,7 @@ static void compile_stmt(Compiler *C, Node *s) {
         compile_expr(C, s->expr);
         if (s->target) {
             compile_expr(C, s->target);
-            emit(C, s->op && !strcmp(s->op, "with") ? OP_THROW_WITH : OP_THROW_NAMED);
+            emit(C, OP_THROW_WITH);
         } else
             emit(C, OP_THROW);
         break;

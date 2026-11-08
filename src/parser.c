@@ -1302,7 +1302,7 @@ static Node *statement(Parser *P) {
     Token *st = peek(P, 0);
     Node *s = tnode(P, S_EXPR, NULL, st);
     if (accept(P, "throw")) {
-        /* throw value, throw Type with "message", throw "Name" with "message" (or "Name" "message") */
+        /* throw value, throw Type with "message", throw "Name" with "message" */
         s->kind = S_THROW;
         s->expr = expression(P, 0);
         if (ptext(P, 0, "with") && peek(P, 0)->kind == T_ID) {
@@ -1311,10 +1311,8 @@ static Node *statement(Parser *P) {
             if (peek(P, 0)->kind == T_NL || peek(P, 0)->kind == T_EOF)
                 pfail(P, "'with' expects a message, such as throw BadInput with \"the input is bad\"%s", "");
             s->target = expression(P, 0);
-        } else if (peek(P, 0)->kind != T_NL && peek(P, 0)->kind != T_EOF) {
-            accept(P, ",");
-            s->target = expression(P, 0);
-        }
+        } else if (peek(P, 0)->kind != T_NL && peek(P, 0)->kind != T_EOF)
+            pfail(P, "expected 'with' before the message, such as throw \"Name\" with \"message\"%s", "");
         finish(P);
         return s;
     }

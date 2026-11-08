@@ -65,7 +65,7 @@ end
 print defers()
 
 try
-    throw "Custom" "named error"
+    throw "Custom" with "named error"
 catch "Custom" e
     print e.name, e.message
 end
