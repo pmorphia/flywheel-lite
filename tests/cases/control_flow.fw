@@ -1,7 +1,7 @@
 function find(int[] xs, int target) returns int
     for i, x in xs do
         try
-            if x == target then
+            if x == target do
                 return i
             end
         finally
@@ -15,10 +15,10 @@ print find([4, 5, 6], 5)
 var log = ""
 for i in 0..<6 do
     try
-        if i == 1 then
+        if i == 1 do
             continue
         end
-        if i == 4 then
+        if i == 4 do
             break
         end
         log += "{i}"
@@ -48,7 +48,7 @@ print nested()
 var count = 0
 while true do
     count += 1
-    if count >= 3 then
+    if count >= 3 do
         break
     end
 end

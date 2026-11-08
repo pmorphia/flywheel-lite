@@ -94,7 +94,7 @@ fresh per-iteration loop bindings, classes with generated constructors and `init
 and `super`, interfaces, operator methods, `to_string`, `hash`/`equals` keys, the iterator
 protocol, enums and enums with data, `match` with every pattern form (values, ranges, enum
 members, types, `ok`/`error`, destructuring, guards), destructuring declarations, generics,
-nullable values, `try`/`catch`/`finally`/`then`, named errors, declared error types (`error Name(...)`,
+nullable values, `try`/`catch`/`finally`, named errors, declared error types (`error Name(...)`,
 `throw Name with "message"`), `assert`, `defer`, `Result`, reactive variables (`reactive`, `when`,
 `computed`), one-call `run` bodies (`if x run f()`, `else run g()`, `for i in xs run f(i)`),
 negated bool aliases (`bool on/off`), units (`unitns name`, `unit`, `unitconv`, quantity

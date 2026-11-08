@@ -12,13 +12,13 @@ end
 
 function area(Shape s) returns double
     match s
-        case Shape.Circle(r) then
+        case Shape.Circle(r) do
             return 3.0 * r * r
-        case Shape.Rect(w, h) if w == h then
+        case Shape.Rect(w, h) if w == h do
             return w * w
-        case Shape.Rect(w, h) then
+        case Shape.Rect(w, h) do
             return w * h
-        case Shape.Empty then
+        case Shape.Empty do
             return 0.0
     end
 end
@@ -30,15 +30,15 @@ print Shape.Circle(2.0) == Shape.Circle(2.0), Shape.Circle(1.0) == Shape.Circle(
 
 function classify(int n) returns string
     match n
-        case 0 then
+        case 0 do
             return "zero"
-        case 1, 2, 3 then
+        case 1, 2, 3 do
             return "small"
-        case 4..9 then
+        case 4..9 do
             return "medium"
-        case 10..<100 then
+        case 10..<100 do
             return "large"
-        else
+        else do
             return "huge"
     end
 end
@@ -48,25 +48,25 @@ end
 
 function color_name(Color c) returns string
     match c
-        case Red then
+        case Red do
             return "warm"
-        case Green, Blue then
+        case Green, Blue do
             return "cool"
     end
 end
 print color_name(Color.Red), color_name(Color.Blue)
 
 function divide(int a, int b) returns Result<int, string>
-    if b == 0 then
+    if b == 0 do
         return Result.error("division by zero")
     end
     return Result.ok(a // b)
 end
 for r in [divide(7, 2), divide(1, 0)] do
     match r
-        case ok v then
+        case ok v do
             print "ok", v
-        case error e then
+        case error e do
             print "error", e
     end
 end
@@ -74,11 +74,11 @@ print divide(9, 3), divide(9, 3).unwrap(), divide(1, 0).is_ok
 
 function describe([int, string] pair) returns string
     match pair
-        case [0, label] then
+        case [0, label] do
             return "zero " + label
-        case [n, _] if n < 0 then
+        case [n, _] if n < 0 do
             return "negative"
-        case [n, label] then
+        case [n, label] do
             return "{label}={n}"
     end
 end
@@ -92,8 +92,8 @@ int? maybe = null
 print maybe ?? 7
 maybe = 5
 match maybe
-    case null then
+    case null do
         print "none"
-    case int v then
+    case int v do
         print "some", v
 end

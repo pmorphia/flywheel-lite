@@ -392,7 +392,7 @@ static bool lex_text(Arena *arena, const char *src, size_t len, TokenList *out, 
             size_t idn = e - L.p;
             emit(&L, T_ID, id, idn, e);
             Token *t = &out->items[out->count - 1];
-            L.expected = tok_is(t, "return") || tok_is(t, "then") || tok_is(t, "do") ||
+            L.expected = tok_is(t, "return") || tok_is(t, "do") ||
                          tok_is(t, "and") || tok_is(t, "or") || tok_is(t, "not") || tok_is(t, "in");
             continue;
         }

@@ -570,7 +570,7 @@ static int run_tests(PathList *paths, const char *exe_dir) {
                 add_str(&program, "teardown_all()\n");
             char tail[160];
             snprintf(tail, sizeof tail,
-                     "if __fw_failed > 0 then\n    throw AssertionError(string(__fw_failed) + \" of %d test(s) "
+                     "if __fw_failed > 0 do\n    throw AssertionError(string(__fw_failed) + \" of %d test(s) "
                      "failed\")\nend\n",
                      ntests);
             add_str(&program, tail);

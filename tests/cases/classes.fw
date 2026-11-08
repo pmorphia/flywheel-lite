@@ -91,7 +91,7 @@ print Temperature(212.0).celsius, Temperature(32.0).label
 class Countdown
     int n
     function next() returns int?
-        if inst n == 0 then
+        if inst n == 0 do
             return null
         end
         inst n -= 1

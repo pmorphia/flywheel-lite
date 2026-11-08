@@ -147,7 +147,7 @@ static Token *expect(Parser *P, const char *s) {
 }
 static const char *reserved_words[] = {
     "import", "as", "var", "const", "class", "function", "component", "returns", "return", "if",
-    "then", "else", "while", "do", "for", "in", "end", "break", "continue", "try", "catch",
+    "else", "while", "do", "for", "in", "end", "break", "continue", "try", "catch",
     "finally", "throw", "inst", "attr", "true", "false", "null", "public", "private", "void",
     "weak", "and", "or", "not", "enum", "interface", "extends", "implements", "match", "case",
     "super", "is", "elements", "defer", "which", NULL};
@@ -814,7 +814,7 @@ static Node *prefix(Parser *P) {
         take(P);
         e = tnode(P, t->kind == T_INT ? N_INT : N_REAL, tstr(P, t), t);
         /* A quantity literal: a number with a unit right after it, 100m, 0.32km, 15time.s. */
-        static const char *not_units[] = {"and", "or", "not", "in", "is", "as", "then", "do", "else",
+        static const char *not_units[] = {"and", "or", "not", "in", "is", "as", "do", "else",
                                           "end", "which", "with", "returns", "if", "for", "while",
                                           "true", "false", "null", NULL};
         Token *u = peek(P, 0);
@@ -892,7 +892,7 @@ static Node *prefix(Parser *P) {
     } else if (t->kind == T_ID) {
         static const char *structural[] = {
             "function", "class", "component", "import", "public", "private", "returns", "return",
-            "if", "then", "else", "while", "do", "for", "in", "end", "break", "continue", "try",
+            "if", "else", "while", "do", "for", "in", "end", "break", "continue", "try",
             "catch", "finally", "throw", "as", "void", "weak", "and", "or", "enum", "interface",
             "extends", "implements", "match", "case", "is", "which", NULL};
         if (in_list(t, structural)) {
@@ -1127,7 +1127,7 @@ static Node *outer(Parser *P) {
             Node *last = n->args.items[n->args.count - 1];
             Token *nx = peek(P, 0);
             if ((last->kind == N_NAME || last->kind == N_MEMBER) && argument_start(nx) &&
-                !(nx->kind == T_ID && (precedence(nx) > 0 || tis(nx, "then") || tis(nx, "do") ||
+                !(nx->kind == T_ID && (precedence(nx) > 0 || tis(nx, "do") ||
                                        tis(nx, "else"))))
                 pfail_at(P, nx->line, nx->col, "nested calls require parentheses around their arguments%s", "");
             e = n;
@@ -1149,7 +1149,7 @@ static bool block_end(Parser *P) {
     if (literal_kind(t))
         return false;
     return tis(t, "end") || tis(t, "else") || tis(t, "catch") || tis(t, "finally") ||
-           tis(t, "case") || (tis(t, "then") && t->kind == T_ID);
+           tis(t, "case");
 }
 static void push_statement(Parser *P, NodeList *out, Node *s) {
     nl_push(P->arena, out, s);
@@ -1188,7 +1188,7 @@ static void spec_pattern_type(Parser *P, void *ctx) {
     TypeBinding *b = ctx;
     b->type = parse_type(P);
     b->name = tstr(P, identifier(P));
-    if (!ptext(P, 0, "then") && !ptext(P, 0, "if"))
+    if (!ptext(P, 0, "do") && !ptext(P, 0, "if"))
         pfail(P, "pattern%s", "");
 }
 typedef struct {
@@ -1229,7 +1229,7 @@ static void run_body(Parser *P, NodeList *out) {
         pfail(P, RUN_USAGE "%s", "");
     static const char *keywords[] = {
         "import", "var",   "const",    "class", "function", "component", "return",   "if",
-        "then",   "else",  "while",    "do",    "for",      "end",       "break",    "continue",
+        "else",  "while",    "do",    "for",      "end",       "break",    "continue",
         "try",    "catch", "finally",  "throw", "match",    "case",      "defer",    "when",
         "reactive", "computed", "assert", "enum", "interface", NULL};
     if (t->kind == T_ID && in_list(t, keywords) && !(tis(t, "function") && ptext(P, 1, "(")))
@@ -1239,7 +1239,7 @@ static void run_body(Parser *P, NodeList *out) {
     static const char *assign_ops[] = {"=", "+=", "-=", "*=", "/=", "//=", "%=", NULL};
     Token *nx = peek(P, 0);
     if (nx->kind == T_OP && in_list(nx, assign_ops))
-        pfail(P, RUN_USAGE "; assignments need 'then' or 'do' ... 'end'%s", "");
+        pfail(P, RUN_USAGE "; assignments need 'do' ... 'end'%s", "");
     if (s->target->kind != N_CALL)
         pfail_at(P, t->line, t->col, RUN_USAGE "%s", "");
     nl_push(P->arena, out, s);
@@ -1252,7 +1252,7 @@ static void spec_run_condition(Parser *P, void *ctx) {
 }
 /* After `if condition run call`, the chain continues with `else run call` or
    `else if condition run call`, on the same line or the next. Any other `else` belongs to an
-   enclosing `if ... then`. */
+   enclosing `if ... do`. */
 static void run_else(Parser *P, Node *s) {
     int saved = P->pos;
     newlines(P);
@@ -1400,13 +1400,13 @@ static Node *statement(Parser *P) {
             block(P, &s->catches[s->ncatches]);
             s->ncatches++;
         }
-        if (accept(P, "finally") || accept(P, "then")) {
+        if (accept(P, "finally")) {
             finish(P);
             block(P, &s->finalizer);
             s->has_else = true; /* marks an explicit finalizer */
         }
         if (s->ncatches == 0 && !s->has_else)
-            pfail_at(P, s->line, s->col, "try requires catch, finally, or then%s", "");
+            pfail_at(P, s->line, s->col, "try requires catch or finally%s", "");
         expect(P, "end");
         finish(P);
         return s;
@@ -1419,7 +1419,7 @@ static Node *statement(Parser *P) {
             run_else(P, s);
             return s;
         }
-        expect(P, "then");
+        expect(P, "do");
         finish(P);
         block(P, &s->body);
         if (accept(P, "else")) {
@@ -1432,6 +1432,7 @@ static Node *statement(Parser *P) {
                 finish(P);
                 return s;
             }
+            expect(P, "do");
             finish(P);
             block(P, &s->other);
         }
@@ -1482,12 +1483,13 @@ static Node *statement(Parser *P) {
                     nl_push(P->arena, &s->patterns[i], expression(P, 0));
                 } while (accept(P, ","));
             s->guards[i] = accept(P, "if") ? expression(P, 0) : NULL;
-            expect(P, "then");
+            expect(P, "do");
             finish(P);
             block(P, &s->catches[i]);
         }
         if (accept(P, "else")) {
             s->has_else = true;
+            expect(P, "do");
             finish(P);
             block(P, &s->other);
         }

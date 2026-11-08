@@ -1,5 +1,5 @@
 print "before"
-if true then
+if true do
     return 3
 end
 print "after"
