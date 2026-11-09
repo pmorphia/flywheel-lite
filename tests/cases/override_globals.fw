@@ -1,0 +1,37 @@
+# Overriding methods with inferred return types read module globals, directly and
+# through functions from another module.
+import lib.hook_base.*
+import lib.ledger.*
+
+int[] fired = [0]
+
+class Loud extends Hook
+    function fire()
+        fired[0] += 1
+        record("loud")
+    end
+end
+
+class Quiet extends Hook
+    function fire()
+        record("quiet")
+    end
+end
+
+interface Counter
+    function total() returns int
+end
+
+class Summary implements Counter
+    function total()
+        return fired[0] * 100 + tally.count
+    end
+end
+
+Hook[] all_hooks = [Loud(), Quiet(), Hook(), Loud()]
+for h in all_hooks do
+    h.fire()
+end
+print report()
+Counter c = Summary()
+print c.total()

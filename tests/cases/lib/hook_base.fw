@@ -1,0 +1,6 @@
+# A base class whose overrides live in another module (override_globals.fw).
+class Hook
+    function fire()
+        print "base hook"
+    end
+end

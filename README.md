@@ -148,7 +148,7 @@ there is no static type checker. So:
   are skipped and counted);
 - Flywheel Lite's own cases in `tests/cases`, whose expected output was produced by the Flywheel compiler.
 
-Current result on Linux: 197 of 206 pass; the 9 others are the known differences above.
+Current result on Linux: 212 of 221 pass; the 9 others are the known differences above.
 `LITE_GC_STRESS=1` collects at every safepoint, which together with `make debug` checks that
 the runtime roots every live value.
 

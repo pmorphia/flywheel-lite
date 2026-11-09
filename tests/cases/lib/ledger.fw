@@ -1,0 +1,16 @@
+# Module state read by overriding methods in override_globals.fw.
+class Tally
+    int count = 0
+    string[] log = []
+end
+
+var tally = Tally()
+
+function record(string event)
+    tally.count += 1
+    tally.log.push(event)
+end
+
+function report() returns string
+    return "{tally.count}: " + tally.log.join(", ")
+end
