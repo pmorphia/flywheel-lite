@@ -589,8 +589,8 @@ static void emit_get_resolved(Compiler *C, Resolved *r) {
 }
 static void compile_name(Compiler *C, const char *raw, int line) {
     const char *name = strip_type_args(C, raw);
-    if (!strcmp(name, "inst"))
-        cfail(C, line, "'inst' is only valid inside methods");
+    if (!strcmp(name, "$this"))
+        cfail(C, line, "'this' is only valid inside methods");
     Resolved r = resolve(C, name);
     if (r.kind == R_NONE) {
         if (strchr(raw, '<')) {
@@ -697,12 +697,12 @@ static void compile_module_member(Compiler *C, ObjModule *mod, const char *raw, 
 }
 
 static int receiver_slot(Compiler *C, int line) {
-    Resolved r = resolve(C, "inst");
+    Resolved r = resolve(C, "$this");
     if (r.kind == R_LOCAL)
         return r.index;
     if (r.kind == R_UPVAL)
         return 1000 + r.index;
-    cfail(C, line, "'inst' is only valid inside methods");
+    cfail(C, line, "'this' is only valid inside methods");
 }
 static void emit_receiver(Compiler *C, int line) {
     int s = receiver_slot(C, line);
@@ -712,10 +712,23 @@ static void emit_receiver(Compiler *C, int line) {
         emit2(C, OP_GET_LOCAL, (uint8_t)s);
 }
 
+static void emit_type_value(Compiler *C, const char *type, int line);
 static void compile_call(Compiler *C, Node *e) {
     Node *callee = e->args.items[0];
     int argc = e->args.count - 1;
     ObjModule *mod;
+    Node *chosen = callee->kind == N_MEMBER && !callee->grouped ? callee->args.items[0] : NULL;
+    if (chosen && chosen->kind == N_MEMBER && chosen->args.items[0]->kind == N_SUPER &&
+        (isupper((unsigned char)chosen->text[0]) || !strcmp(callee->text, "init"))) {
+        /* super.Base.method(...) / super.Base.constructor(...) */
+        emit_receiver(C, e->line);
+        compile_args(C, e, 1);
+        emit_type_value(C, chosen->text, e->line);
+        emit(C, OP_SUPER_INVOKE_AT);
+        emit16(C, name_const(C, strip_type_args(C, callee->text)));
+        emit(C, (uint8_t)argc);
+        return;
+    }
     if (callee->kind == N_MEMBER && !callee->grouped && callee->args.items[0]->kind == N_SUPER) {
         emit_receiver(C, e->line);
         compile_args(C, e, 1);
@@ -1096,7 +1109,24 @@ static void compile_expr(Compiler *C, Node *e) {
         break;
     }
     case N_SUPER:
-        cfail(C, e->line, "'super' must be followed by a method, as in super.init(...)");
+        cfail(C, e->line, "'super' must be followed by a member, such as super.constructor(...) or super.speak()");
+    case N_THIS:
+        emit_receiver(C, e->line);
+        break;
+    case N_TERNARY: {
+        compile_expr(C, e->args.items[0]);
+        int otherwise = emit_jump(C, OP_JUMP_IF_FALSE);
+        compile_expr(C, e->args.items[1]);
+        int end = emit_jump(C, OP_JUMP);
+        patch_jump(C, otherwise);
+        compile_expr(C, e->args.items[2]);
+        patch_jump(C, end);
+        break;
+    }
+    case N_SPAWN:
+        compile_lambda(C, e);
+        emit(C, OP_SPAWN);
+        break;
     case N_CALL:
         compile_call(C, e);
         break;
@@ -1675,6 +1705,13 @@ static void compile_assign(Compiler *C, Node *s) {
         else
             compile_expr(C, t->args.items[0]);
         int name = name_const(C, t->text);
+        if (s->valueless) {
+            /* a static field's initializer (from the class body) */
+            compile_expr(C, s->expr);
+            emit(C, OP_DEFINE_STATIC);
+            emit16(C, name);
+            return;
+        }
         if (compound) {
             emit(C, OP_DUP);
             emit(C, OP_GET_MEMBER);
@@ -1923,7 +1960,7 @@ static ObjFunction *compile_function(Compiler *C, FuncDecl *f, bool method, bool
             fn->required = i + 1;
     C->line = f->line;
     fs->scope_depth = 1;
-    add_local(C, method ? "inst" : "", val_null(), true);
+    add_local(C, method ? "$this" : "", val_null(), true);
     for (int i = 0; i < f->nparams; i++) {
         Value t = make_type(C, f->params[i].type);
         add_local(C, f->params[i].name, t, false);
@@ -2026,9 +2063,13 @@ static ObjClass *build_class(Compiler *C, ClassDecl *d) {
     k->field_types = TB_ALLOC(vm, Value, d->nfields ? d->nfields : 1);
     k->field_has_default = TB_ALLOC(vm, bool, d->nfields ? d->nfields : 1);
     k->field_consts = TB_ALLOC(vm, Value, d->nfields ? d->nfields : 1);
+    k->field_owner = xmalloc(sizeof(ObjClass *) * (size_t)(d->nfields ? d->nfields : 1));
+    k->field_access = calloc((size_t)(d->nfields ? d->nfields : 1), 1);
     bool computed = false;
     for (int i = 0; i < d->nfields; i++) {
         Param *p = &d->fields[i];
+        k->field_owner[i] = k;
+        k->field_access[i] = p->is_private ? 1 : p->is_protected ? 2 : 0;
         k->field_names[i] = str_intern_c(vm, p->name);
         Value t = make_type(C, p->type);
         k->field_types[i] = t;
@@ -2052,7 +2093,7 @@ static ObjClass *build_class(Compiler *C, ClassDecl *d) {
         fn->owner = k;
         fn->name = str_intern_c(vm, "$defaults");
         fs->scope_depth = 1;
-        add_local(C, "inst", val_null(), true);
+        add_local(C, "$this", val_null(), true);
         for (int i = 0; i < d->nfields; i++) {
             Param *p = &d->fields[i];
             if (!p->value || !IS_UNDEF(k->field_consts[i]))
@@ -2079,8 +2120,25 @@ static ObjClass *build_class(Compiler *C, ClassDecl *d) {
         if (m->is_abstract)
             continue;
         ObjFunction *fn = compile_function(C, m, true, false, false, k);
+        fn->access = m->is_private ? 1 : m->is_protected ? 2 : 0;
         ObjClosure *cl = new_closure(vm, fn);
         table_set(vm, &k->methods, str_intern_c(vm, m->name), val_obj(cl));
+    }
+    /* static methods: functions without a receiver, owned by the class for access */
+    for (int i = 0; i < d->nstatic_methods; i++) {
+        FuncDecl *m = &d->static_methods[i];
+        ObjFunction *fn = compile_function(C, m, false, false, false, k);
+        ObjClosure *cl = new_closure(vm, fn);
+        ObjString *nm = str_intern_c(vm, m->name);
+        table_set(vm, &k->statics, nm, val_obj(cl));
+        if (m->is_private || m->is_protected)
+            table_set(vm, &k->static_access, nm, val_int(m->is_private ? 1 : 2));
+    }
+    for (int i = 0; i < d->nstatic_fields; i++) {
+        Param *p = &d->static_fields[i];
+        int bits = (p->is_private ? 1 : p->is_protected ? 2 : 0) | (p->readonly ? 4 : 0);
+        if (bits)
+            table_set(vm, &k->static_access, str_intern_c(vm, p->name), val_int(bits));
     }
     return k;
 }
@@ -2110,9 +2168,9 @@ static void emit_class(Compiler *C, ClassEntry *entries, int n, int i) {
         return;
     e->emitted = true;
     ClassDecl *d = e->decl;
-    /* define a base declared in this module first */
-    if (d->base) {
-        const char *bn = strip_type_args(C, d->base);
+    /* define bases declared in this module first */
+    for (int b = 0; b < d->nbases; b++) {
+        const char *bn = strip_type_args(C, d->bases[b]);
         for (int j = 0; j < n; j++)
             if (!strcmp(entries[j].decl->name, bn))
                 emit_class(C, entries, n, j);
@@ -2125,8 +2183,8 @@ static void emit_class(Compiler *C, ClassEntry *entries, int n, int i) {
     }
     C->line = d->line;
     int kc = make_const(C, val_obj(e->klass));
-    if (d->base) {
-        emit_type_value(C, d->base, d->line);
+    for (int b = 0; b < d->nbases; b++) {
+        emit_type_value(C, d->bases[b], d->line);
         emit(C, OP_INHERIT);
         emit16(C, kc);
     }

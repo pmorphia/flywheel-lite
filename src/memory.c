@@ -207,6 +207,7 @@ ObjClass *new_class(VM *vm, ObjString *name) {
     table_init(&k->field_index);
     table_init(&k->methods);
     table_init(&k->statics);
+    table_init(&k->static_access);
     k->defaults = val_null();
     k->singleton = val_null();
     Value n = val_null();
@@ -583,6 +584,11 @@ static void blacken(VM *vm, Obj *o) {
         ObjClass *k = (ObjClass *)o;
         mark_obj(vm, (Obj *)k->name);
         mark_obj(vm, (Obj *)k->super);
+        for (int i = 0; i < k->nsupers; i++)
+            mark_obj(vm, (Obj *)k->supers[i]);
+        for (int i = 0; i < k->nmro; i++)
+            mark_obj(vm, (Obj *)k->mro[i]);
+        mark_table(vm, &k->static_access);
         mark_obj(vm, (Obj *)k->module);
         for (int i = 0; i < k->nfields; i++) {
             mark_obj(vm, (Obj *)k->field_names[i]);
@@ -723,6 +729,11 @@ static void free_obj(VM *vm, Obj *o) {
         table_free(vm, &k->field_index);
         table_free(vm, &k->methods);
         table_free(vm, &k->statics);
+        table_free(vm, &k->static_access);
+        free(k->supers);
+        free(k->mro);
+        free(k->field_owner);
+        free(k->field_access);
         TB_FREE(vm, ObjClass *, k->interfaces, k->ninterfaces);
         tb_realloc(vm, o, sizeof(ObjClass), 0);
         return;
@@ -804,12 +815,30 @@ void gc_collect(VM *vm) {
     for (int i = 0; i < TM_COUNT; i++)
         mark_table(vm, &vm->type_methods[i]);
     mark_val(vm, vm->empty_fragment);
+    mark_obj(vm, (Obj *)vm->task_class);
+    mark_array(vm, &vm->finalizers);
     Obj *named[] = {(Obj *)vm->s_init, (Obj *)vm->s_to_string, (Obj *)vm->s_length,
                     (Obj *)vm->s_message, (Obj *)vm->s_name};
     for (size_t i = 0; i < sizeof named / sizeof named[0]; i++)
         mark_obj(vm, named[i]);
     while (vm->gray_count > 0)
         blacken(vm, vm->gray[--vm->gray_count]);
+    /* Unreachable instances with destructors survive this collection (with everything they
+     * reference); their destructors run at the next safepoint, and a later collection frees
+     * them. */
+    bool resurrected = false;
+    for (Obj *o = vm->objects; o; o = o->next)
+        if (o->type == OBJ_INSTANCE && !o->marked && !((ObjInstance *)o)->finalized &&
+            ((ObjInstance *)o)->klass->has_destructor) {
+            ((ObjInstance *)o)->finalized = true;
+            va_push(vm, &vm->finalizers, val_obj(o));
+            resurrected = true;
+        }
+    if (resurrected) {
+        mark_array(vm, &vm->finalizers);
+        while (vm->gray_count > 0)
+            blacken(vm, vm->gray[--vm->gray_count]);
+    }
     /* Interned strings are weak. */
     for (int i = 0; i < vm->strings.cap; i++) {
         Entry *e = &vm->strings.entries[i];

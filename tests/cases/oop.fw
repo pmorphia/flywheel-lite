@@ -1,0 +1,65 @@
+class Named
+    string name
+    function describe() returns string
+        return "named " + this.name
+    end
+    function hello() returns string
+        return "Named.hello"
+    end
+end
+class Aged
+    int age = 0
+    function describe() returns string
+        return "aged {this.age}"
+    end
+    function birthday()
+        this.age += 1
+    end
+end
+class Person extends Named, Aged
+    static int count = 0
+    private string secret = "s"
+    protected int level = 1
+    constructor(string name, int age)
+        super.Named.constructor(name)
+        this.age = age
+        Person.count += 1
+    end
+    destructor
+        print "bye {this.name}"
+    end
+    function describe() returns string
+        return super.describe() + " / " + super.Aged.describe() + " / " + this.secret
+    end
+    static function make(string n) returns Person
+        return Person(n, 1)
+    end
+end
+class Student extends Person
+    constructor(string name)
+        super.constructor(name, 20)
+        this.level = 2
+    end
+end
+function show(Aged a) returns string
+    return "age {a.age}"
+end
+var p = Person("Ann", 30)
+p.birthday()
+print p.describe()
+print show(p)
+print Person.count
+var q = Person.make("Bo")
+print q.describe(), Person.count
+var s = Student("Cy")
+print s.describe(), s is Aged, s is Named
+print "big" if p.age > 5 else "small"
+var n = 3
+var x = 1.5 if n > 2 else 2.0
+print x
+function work(int k) returns int
+    return k * 2
+end
+var t = spawn work(21)
+print t.join()
+spawn print "threaded"

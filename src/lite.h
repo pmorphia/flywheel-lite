@@ -204,7 +204,8 @@ typedef struct ObjFunction {
     Chunk chunk;
     ObjString *name;
     struct ObjModule *module;
-    struct ObjClass *owner; /* defining class, for super */
+    struct ObjClass *owner; /* defining class, for super (static methods: their class) */
+    uint8_t access;         /* methods: 0 public, 1 private, 2 protected */
     InlineCache *caches;
     int ncaches;
 } ObjFunction;
@@ -244,7 +245,11 @@ typedef struct {
 typedef struct ObjClass {
     Obj obj;
     ObjString *name;
-    struct ObjClass *super;
+    struct ObjClass *super;   /* the first base class */
+    struct ObjClass **supers; /* every base class, in declaration order */
+    int nsupers;
+    struct ObjClass **mro;    /* C3 linearization: the class, then its bases */
+    int nmro;
     struct ObjModule *module;
     int nfields;
     ObjString **field_names;
@@ -252,6 +257,9 @@ typedef struct ObjClass {
     bool *field_has_default;
     Value *field_consts;      /* constant default, or undef when computed by `defaults` */
     int own_start;            /* first field declared by this class */
+    struct ObjClass **field_owner; /* the class declaring each field */
+    uint8_t *field_access;    /* per field: 0 public, 1 private, 2 protected */
+    Table static_access;      /* static member -> 1 private, 2 protected */
     Table field_index;
     Table methods;
     Table statics;
@@ -262,6 +270,7 @@ typedef struct ObjClass {
     bool is_interface, is_enum, is_variant, finalized, native;
     int variant_index;
     Value m_init, m_to_string, m_eq, m_lt, m_le, m_gt, m_ge, m_hash, m_equals, m_next, m_iterator;
+    bool has_destructor; /* this class or a base declares `destructor` */
 } ObjClass;
 #define AS_CLASS(v) ((ObjClass *)AS_OBJ(v))
 
@@ -269,6 +278,7 @@ typedef struct {
     Obj obj;
     ObjClass *klass;
     int nfields;
+    bool finalized; /* its destructors have run */
     Value fields[];
 } ObjInstance;
 #define AS_INSTANCE(v) ((ObjInstance *)AS_OBJ(v))
@@ -430,6 +440,9 @@ struct VM {
     bool has_error;
 
     ObjClass *error_class; /* unused placeholder for builtin errors */
+    ObjClass *task_class;  /* thread.task, made by `spawn` */
+    ValueArray finalizers; /* unreachable instances whose destructors run at the next safepoint */
+    bool finalizing;
     ObjString *s_init, *s_to_string, *s_length, *s_message, *s_name;
 
     int argc;
@@ -485,9 +498,15 @@ char *xstrndup(const char *s, size_t n);
 
 Obj *alloc_obj(VM *vm, size_t size, ObjType type);
 void gc_collect(VM *vm);
+void vm_run_finalizers(VM *vm);
+/* Runs the destructors of every instance still alive, at exit. */
+void vm_finalize_all(VM *vm);
 static inline void vm_maybe_gc(VM *vm) {
-    if (TB_UNLIKELY(vm->bytes_allocated > vm->next_gc) && !vm->gc_off)
+    if (TB_UNLIKELY(vm->bytes_allocated > vm->next_gc) && !vm->gc_off) {
         gc_collect(vm);
+        if (vm->finalizers.count && !vm->finalizing)
+            vm_run_finalizers(vm);
+    }
 }
 void push_root(VM *vm, Value v);
 void pop_root(VM *vm, int n);

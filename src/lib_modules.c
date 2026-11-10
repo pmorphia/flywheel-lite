@@ -365,6 +365,67 @@ NATIVE(m_random) {
     *out = val_double((double)(rng_next(vm) >> 11) * (1.0 / 9007199254740992.0));
     return true;
 }
+static uint64_t magnitude(int64_t v) { return v < 0 ? 0 - (uint64_t)v : (uint64_t)v; }
+static uint64_t gcd_u(uint64_t x, uint64_t y) {
+    while (y) {
+        uint64_t t = x % y;
+        x = y;
+        y = t;
+    }
+    return x;
+}
+NATIVE(m_gcd) {
+    (void)argc;
+    if (!IS_INT(args[0]) || !IS_INT(args[1]))
+        return vm_throw(vm, "TypeError", "math.gcd requires integer arguments");
+    uint64_t g = gcd_u(magnitude(args[0].as.i), magnitude(args[1].as.i));
+    if (g > (uint64_t)INT64_MAX)
+        return vm_throw(vm, "NumericError", "integer overflow in math.gcd");
+    *out = val_int((int64_t)g);
+    return true;
+}
+NATIVE(m_lcm) {
+    (void)argc;
+    if (!IS_INT(args[0]) || !IS_INT(args[1]))
+        return vm_throw(vm, "TypeError", "math.lcm requires integer arguments");
+    uint64_t x = magnitude(args[0].as.i), y = magnitude(args[1].as.i);
+    if (!x || !y) {
+        *out = val_int(0);
+        return true;
+    }
+    x /= gcd_u(x, y);
+    if (x > (uint64_t)INT64_MAX / y)
+        return vm_throw(vm, "NumericError", "integer overflow in math.lcm");
+    *out = val_int((int64_t)(x * y));
+    return true;
+}
+NATIVE(m_factorial) {
+    (void)argc;
+    if (!IS_INT(args[0]))
+        return vm_throw(vm, "TypeError", "math.factorial requires an integer");
+    int64_t n = args[0].as.i, r = 1;
+    if (n < 0)
+        return vm_throw(vm, "ValueError", "math.factorial requires a non-negative integer");
+    if (n > 20)
+        return vm_throw(vm, "NumericError", "integer overflow in math.factorial");
+    for (int64_t i = 2; i <= n; i++)
+        r *= i;
+    *out = val_int(r);
+    return true;
+}
+NATIVE(m_sign) {
+    (void)argc;
+    Value v = args[0];
+    if (IS_INT(v)) {
+        *out = val_int(v.as.i > 0 ? 1 : v.as.i < 0 ? -1 : 0);
+        return true;
+    }
+    if (!IS_DOUBLE(v))
+        return vm_throw(vm, "TypeError", "math.sign requires a number");
+    double d = v.as.d;
+    *out = val_double(d > 0 ? 1.0 : d < 0 ? -1.0 : d);
+    return true;
+}
 NATIVE(m_random_int) {
     (void)argc;
     if (!IS_INT(args[0]) || !IS_INT(args[1]))
@@ -406,7 +467,8 @@ static void make_math(VM *vm, ObjModule *m) {
                {"cbrt", m_cbrt, 1, 1},   {"is_nan", m_is_nan, 1, 1}, {"is_finite", m_is_finite, 1, 1},
                {"abs", m_abs, 1, 1},     {"min", m_min, 1, -1},      {"max", m_max, 1, -1},
                {"clamp", m_clamp, 3, 3}, {"random", m_random, 0, 0}, {"random_int", m_random_int, 2, 2},
-               {"seed", m_seed, 1, 1},   {NULL, NULL, 0, 0}};
+               {"seed", m_seed, 1, 1},   {"gcd", m_gcd, 2, 2},       {"lcm", m_lcm, 2, 2},
+               {"factorial", m_factorial, 1, 1}, {"sign", m_sign, 1, 1}, {NULL, NULL, 0, 0}};
     for (int i = 0; fns[i].n; i++)
         module_set_native(vm, m, fns[i].n, fns[i].f, fns[i].a, fns[i].b);
 }

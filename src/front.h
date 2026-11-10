@@ -53,6 +53,9 @@ typedef enum {
     N_ELEMENT,
     N_JSON,
     N_UNITLIT, /* 100m: text is the unit (or ns.unit), args[0] the number */
+    N_THIS,    /* the receiver (`this`; `this.name` parses as N_INST) */
+    N_TERNARY, /* `x if c else y`: args are c, x, y */
+    N_SPAWN,   /* `spawn call`: fn is a no-parameter lambda running the call */
     /* statements */
     S_EXPR,
     S_DECLARE,
@@ -77,6 +80,7 @@ typedef struct Param {
     Node *value;
     int line;
     bool is_private, readonly;
+    bool is_protected; /* class members: visible in the class and its subclasses */
 } Param;
 
 typedef struct FuncDecl {
@@ -87,7 +91,7 @@ typedef struct FuncDecl {
     int nparams;
     NodeList body;
     int line;
-    bool is_abstract, is_private;
+    bool is_abstract, is_private, is_protected;
 } FuncDecl;
 
 struct Node {
@@ -116,7 +120,8 @@ struct Node {
 
 typedef struct {
     const char *name;
-    const char *base;
+    const char **bases; /* `extends A, B`: base classes in order */
+    int nbases;
     const char **interfaces;
     int ninterfaces;
     Param *fields;
@@ -128,6 +133,12 @@ typedef struct {
     const char **variants;
     int nvariants;
     int line;
+    /* `static` members: methods without a receiver, and fields (name and access only; their
+     * initializers are S_ASSIGN statements with `valueless` set, placed in the body). */
+    FuncDecl *static_methods;
+    int nstatic_methods;
+    Param *static_fields;
+    int nstatic_fields;
 } ClassDecl;
 
 typedef struct {
@@ -207,6 +218,7 @@ typedef struct {
     int temporaries;
     int which_depth; /* inside a `which` condition: `.name` and a leading operator use the item */
     NodeList pending;
+    bool no_ternary; /* case patterns: `if` starts the guard */
     jmp_buf *jmp;
     CompileError *err;
     int line_offset;

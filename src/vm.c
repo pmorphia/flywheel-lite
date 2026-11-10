@@ -120,7 +120,9 @@ static bool error_matches(VM *vm, Value err, ObjString *name) {
         return e->type == name || !strcmp(e->type->chars, name->chars);
     }
     if (IS_OBJT(err, OBJ_INSTANCE)) {
-        for (ObjClass *k = AS_INSTANCE(err)->klass; k; k = k->super) {
+        ObjClass *klass = AS_INSTANCE(err)->klass;
+        for (int m = 0; m < (klass->nmro ? klass->nmro : 1); m++) {
+            ObjClass *k = klass->nmro ? klass->mro[m] : klass;
             if (!strcmp(k->name->chars, name->chars))
                 return true;
             for (int i = 0; i < k->ninterfaces; i++)
@@ -136,13 +138,14 @@ static bool error_matches(VM *vm, Value err, ObjString *name) {
 /* ---------------------------------------------------------------- classes */
 
 bool vm_is_instance(ObjClass *klass, ObjClass *of) {
-    for (ObjClass *k = klass; k; k = k->super) {
-        if (k == of)
+    if (klass == of)
+        return true;
+    for (int i = 0; i < klass->nsupers; i++)
+        if (vm_is_instance(klass->supers[i], of))
             return true;
-        for (int i = 0; i < k->ninterfaces; i++)
-            if (vm_is_instance(k->interfaces[i], of))
-                return true;
-    }
+    for (int i = 0; i < klass->ninterfaces; i++)
+        if (vm_is_instance(klass->interfaces[i], of))
+            return true;
     return false;
 }
 Value vm_find_method(ObjClass *klass, ObjString *name) {
@@ -152,48 +155,182 @@ Value vm_find_method(ObjClass *klass, ObjString *name) {
     return val_null();
 }
 
-static void finalize_class(VM *vm, ObjClass *k) {
-    if (k->finalized)
-        return;
-    k->finalized = true;
-    ObjClass *s = k->super;
-    if (s) {
-        int own = k->nfields, total = s->nfields + own;
-        ObjString **names = TB_ALLOC(vm, ObjString *, total ? total : 1);
-        Value *types = TB_ALLOC(vm, Value, total ? total : 1);
-        bool *has = TB_ALLOC(vm, bool, total ? total : 1);
-        Value *consts = TB_ALLOC(vm, Value, total ? total : 1);
-        for (int i = 0; i < s->nfields; i++) {
-            names[i] = s->field_names[i];
-            types[i] = s->field_types[i];
-            has[i] = s->field_has_default[i];
-            consts[i] = s->field_consts[i];
+/* The C3 linearization of k (bases finalized first): every class precedes its bases and base
+ * order is kept. Returns false when the bases admit no consistent order. */
+static bool linearize(ObjClass *k) {
+    int nseq = k->nsupers + 1, total = 1;
+    ObjClass ***seqs = xmalloc(sizeof(ObjClass **) * (size_t)nseq);
+    int *lens = xmalloc(sizeof(int) * (size_t)nseq), *heads = xmalloc(sizeof(int) * (size_t)nseq);
+    for (int i = 0; i < k->nsupers; i++) {
+        seqs[i] = k->supers[i]->mro;
+        lens[i] = k->supers[i]->nmro;
+        heads[i] = 0;
+        total += lens[i];
+    }
+    seqs[k->nsupers] = k->supers;
+    lens[k->nsupers] = k->nsupers;
+    heads[k->nsupers] = 0;
+    k->mro = xmalloc(sizeof(ObjClass *) * (size_t)total);
+    k->nmro = 0;
+    k->mro[k->nmro++] = k;
+    bool ok = true;
+    for (;;) {
+        bool empty = true;
+        for (int i = 0; i < nseq; i++)
+            empty = empty && heads[i] >= lens[i];
+        if (empty)
+            break;
+        ObjClass *next = NULL;
+        for (int i = 0; i < nseq && !next; i++) {
+            if (heads[i] >= lens[i])
+                continue;
+            ObjClass *candidate = seqs[i][heads[i]];
+            bool in_tail = false;
+            for (int j = 0; j < nseq && !in_tail; j++)
+                for (int q = heads[j] + 1; q < lens[j]; q++)
+                    if (seqs[j][q] == candidate)
+                        in_tail = true;
+            if (!in_tail)
+                next = candidate;
         }
+        if (!next) {
+            ok = false;
+            break;
+        }
+        k->mro[k->nmro++] = next;
+        for (int i = 0; i < nseq; i++)
+            if (heads[i] < lens[i] && seqs[i][heads[i]] == next)
+                heads[i]++;
+    }
+    free(seqs);
+    free(lens);
+    free(heads);
+    return ok;
+}
+static bool declares_method(ObjClass *k, ObjString *name, Value *out) {
+    Value v;
+    if (!table_get(&k->methods, name, &v))
+        return false;
+    if (IS_OBJT(v, OBJ_CLOSURE) && ((ObjClosure *)AS_OBJ(v))->fn->owner != k)
+        return false;
+    if (out)
+        *out = v;
+    return true;
+}
+/* The implementation of `name` after `from` in k's linearization (super.name). */
+static Value next_method(ObjClass *k, ObjClass *from, ObjString *name, ObjClass **found) {
+    int at = 0;
+    while (at < k->nmro && k->mro[at] != from)
+        at++;
+    for (int i = at + 1; i < k->nmro; i++) {
+        Value v;
+        if (declares_method(k->mro[i], name, &v)) {
+            if (found)
+                *found = k->mro[i];
+            return v;
+        }
+    }
+    return val_null();
+}
+static bool finalize_class(VM *vm, ObjClass *k) {
+    if (k->finalized)
+        return true;
+    k->finalized = true;
+    for (int i = 0; i < k->nsupers; i++)
+        if (!finalize_class(vm, k->supers[i]))
+            return false;
+    ObjClass *s = k->super;
+    int own = k->nfields;
+    if (!k->field_owner) {
+        k->field_owner = xmalloc(sizeof(ObjClass *) * (size_t)(own ? own : 1));
+        for (int i = 0; i < own; i++)
+            k->field_owner[i] = k;
+    }
+    if (!k->field_access)
+        k->field_access = calloc((size_t)(own ? own : 1), 1);
+    if (!linearize(k))
+        return vm_throw(vm, "TypeError", "class %s has an inconsistent base class order (no linearization)",
+                        k->name->chars);
+    if (k->nsupers) {
+        /* Base fields first, in base order; a field inherited along two paths appears once. */
+        int cap = own;
+        for (int b = 0; b < k->nsupers; b++)
+            cap += k->supers[b]->nfields;
+        ObjString **names = TB_ALLOC(vm, ObjString *, cap ? cap : 1);
+        Value *types = TB_ALLOC(vm, Value, cap ? cap : 1);
+        bool *has = TB_ALLOC(vm, bool, cap ? cap : 1);
+        Value *consts = TB_ALLOC(vm, Value, cap ? cap : 1);
+        ObjClass **owners = xmalloc(sizeof(ObjClass *) * (size_t)(cap ? cap : 1));
+        uint8_t *access = calloc((size_t)(cap ? cap : 1), 1);
+        int total = 0;
+        for (int b = 0; b < k->nsupers; b++) {
+            ObjClass *base = k->supers[b];
+            for (int i = 0; i < base->nfields; i++) {
+                int seen = -1;
+                for (int q = 0; q < total; q++)
+                    if (names[q] == base->field_names[i])
+                        seen = q;
+                for (int q = 0; q < own; q++)
+                    if (k->field_names[q] == base->field_names[i])
+                        return vm_throw(vm, "TypeError", "field '%s' is already declared by base class '%s'",
+                                        base->field_names[i]->chars, base->name->chars);
+                if (seen >= 0) {
+                    if (owners[seen] != base->field_owner[i])
+                        return vm_throw(vm, "TypeError", "base classes of %s both declare a field '%s'",
+                                        k->name->chars, base->field_names[i]->chars);
+                    continue;
+                }
+                names[total] = base->field_names[i];
+                types[total] = base->field_types[i];
+                has[total] = base->field_has_default[i];
+                consts[total] = base->field_consts[i];
+                owners[total] = base->field_owner[i];
+                access[total] = base->field_access[i];
+                total++;
+            }
+        }
+        int inherited = total;
         for (int i = 0; i < own; i++) {
-            names[s->nfields + i] = k->field_names[i];
-            types[s->nfields + i] = k->field_types[i];
-            has[s->nfields + i] = k->field_has_default[i];
-            consts[s->nfields + i] = k->field_consts[i];
+            names[total] = k->field_names[i];
+            types[total] = k->field_types[i];
+            has[total] = k->field_has_default[i];
+            consts[total] = k->field_consts[i];
+            owners[total] = k;
+            access[total] = k->field_access[i];
+            total++;
         }
         TB_FREE(vm, ObjString *, k->field_names, own ? own : 1);
         TB_FREE(vm, Value, k->field_types, own ? own : 1);
         TB_FREE(vm, bool, k->field_has_default, own ? own : 1);
         TB_FREE(vm, Value, k->field_consts, own ? own : 1);
+        free(k->field_owner);
+        free(k->field_access);
         k->field_names = names;
         k->field_types = types;
         k->field_has_default = has;
         k->field_consts = consts;
+        k->field_owner = owners;
+        k->field_access = access;
+        /* the arrays keep their capacity; account for them as freed by their length */
+        vm->bytes_allocated -= (size_t)(cap - total) * (sizeof(ObjString *) + 2 * sizeof(Value) + sizeof(bool));
         k->nfields = total;
-        k->own_start = s->nfields;
-        for (int i = 0; i < s->methods.cap; i++) {
-            Entry *e = &s->methods.entries[i];
-            if (!e->key)
-                continue;
-            Value existing;
-            if (!table_get(&k->methods, e->key, &existing))
-                table_set(vm, &k->methods, e->key, e->value);
+        k->own_start = inherited;
+        /* Methods along the linearization: the first class providing one wins. */
+        for (int m = 1; m < k->nmro; m++) {
+            ObjClass *c = k->mro[m];
+            for (int i = 0; i < c->methods.cap; i++) {
+                Entry *e = &c->methods.entries[i];
+                if (!e->key)
+                    continue;
+                Value existing;
+                if (!table_get(&k->methods, e->key, &existing) && declares_method(c, e->key, NULL))
+                    table_set(vm, &k->methods, e->key, e->value);
+            }
         }
     }
+    for (int m = 0; m < k->nmro; m++)
+        if (declares_method(k->mro[m], str_intern_c(vm, "$destroy"), NULL))
+            k->has_destructor = true;
     for (int i = 0; i < k->nfields; i++)
         table_set(vm, &k->field_index, k->field_names[i], val_int(i));
 #define M(field, nm) k->field = vm_find_method(k, str_intern_c(vm, nm))
@@ -220,23 +357,30 @@ static void finalize_class(VM *vm, ObjClass *k) {
         } else
             table_set(vm, &s->statics, short_name, val_obj(k));
     }
+    return true;
 }
 
-static bool run_defaults(VM *vm, ObjClass *k, ObjInstance *inst) {
-    if (k->super && !run_defaults(vm, k->super, inst))
-        return false;
+static bool run_own_defaults(VM *vm, ObjClass *k, ObjInstance *inst) {
     if (IS_NULL(k->defaults))
         return true;
     Value out;
-    Value recv = val_obj(inst);
-    ObjClosure *cl = (ObjClosure *)AS_OBJ(k->defaults);
-    (void)cl;
-    return vm_call(vm, val_obj(new_bound(vm, recv, k->defaults)), 0, NULL, &out);
+    return vm_call(vm, val_obj(new_bound(vm, val_obj(inst), k->defaults)), 0, NULL, &out);
+}
+/* Computed defaults of every class in the linearization, bases first, each once. */
+static bool run_defaults(VM *vm, ObjClass *k, ObjInstance *inst) {
+    if (!k->nmro)
+        return run_own_defaults(vm, k, inst);
+    for (int i = k->nmro - 1; i >= 0; i--)
+        if (!run_own_defaults(vm, k->mro[i], inst))
+            return false;
+    return true;
 }
 bool vm_run_defaults(VM *vm, ObjClass *k, ObjInstance *inst) { return run_defaults(vm, k, inst); }
 static bool chain_has_defaults(ObjClass *k) {
-    for (; k; k = k->super)
-        if (!IS_NULL(k->defaults))
+    if (!k->nmro)
+        return !IS_NULL(k->defaults);
+    for (int i = 0; i < k->nmro; i++)
+        if (!IS_NULL(k->mro[i]->defaults))
             return true;
     return false;
 }
@@ -244,7 +388,7 @@ static bool check_required(VM *vm, ObjInstance *inst, bool from_init) {
     for (int i = 0; i < inst->nfields; i++)
         if (IS_UNDEF(inst->fields[i])) {
             if (from_init)
-                return vm_throw(vm, "RuntimeError", "init must assign required field '%s' of %s",
+                return vm_throw(vm, "RuntimeError", "the constructor must assign required field '%s' of %s",
                                 inst->klass->field_names[i]->chars, inst->klass->name->chars);
             return vm_throw(vm, "TypeError", "%s requires field '%s'", inst->klass->name->chars,
                             inst->klass->field_names[i]->chars);
@@ -269,16 +413,37 @@ bool vm_init_fields(VM *vm, ObjClass *k, ObjInstance *inst, int argc, Value *arg
             return false;
     return true;
 }
-/* Whether construction uses `init` (an inherited init applies only when no fields are added
- * that lack defaults). */
+/* The generated constructor of base class `base` run by super.constructor(...): its fields
+ * in order, wherever the instance's class places them. */
+static bool init_base_fields(VM *vm, ObjClass *base, ObjInstance *inst, int argc, Value *args) {
+    if (base == inst->klass)
+        return vm_init_fields(vm, base, inst, argc, args);
+    if (argc > base->nfields)
+        return vm_throw(vm, "TypeError", "%s takes at most %d argument%s, got %d", base->name->chars,
+                        base->nfields, base->nfields == 1 ? "" : "s", argc);
+    for (int i = 0; i < argc; i++) {
+        Value idx;
+        if (!table_get(&inst->klass->field_index, base->field_names[i], &idx))
+            return vm_throw(vm, "TypeError", "%s has no field '%s'", inst->klass->name->chars,
+                            base->field_names[i]->chars);
+        if (!set_field(vm, inst, (int)idx.as.i, args[i]))
+            return false;
+    }
+    return true;
+}
+/* Whether construction uses the constructor (init). An inherited one applies only when every
+ * field it does not set itself has a default. */
 static Value applicable_init(ObjClass *k) {
     if (IS_NULL(k->m_init))
         return val_null();
     ObjClosure *cl = (ObjClosure *)AS_OBJ(k->m_init);
     if (cl->fn->owner != k) {
-        for (int i = k->own_start; i < k->nfields; i++)
-            if (!k->field_has_default[i])
+        ObjClass *provider = cl->fn->owner;
+        for (int i = 0; i < k->nfields; i++) {
+            Value idx;
+            if (!k->field_has_default[i] && !table_get(&provider->field_index, k->field_names[i], &idx))
                 return val_null();
+        }
     }
     return k->m_init;
 }
@@ -1063,10 +1228,74 @@ static bool enum_from_name(VM *vm, int argc, Value *args, Value *out) {
             *out = e->members[i];
     return true;
 }
-static bool get_class_static(VM *vm, ObjClass *k, ObjString *name, Value *out) {
-    for (ObjClass *c = k; c; c = c->super) {
+static bool task_join(VM *vm, int argc, Value *args, Value *out) {
+    (void)argc;
+    ObjInstance *t = AS_INSTANCE(args[0]);
+    if (!IS_NULL(t->fields[1]))
+        return vm_throw_value(vm, t->fields[1]);
+    *out = t->fields[0];
+    return true;
+}
+static bool task_done(VM *vm, int argc, Value *args, Value *out) {
+    (void)vm;
+    (void)argc;
+    (void)args;
+    *out = val_bool(true);
+    return true;
+}
+/* Private members are visible in their own class (its methods, static methods, and lambdas in
+ * them); protected ones also in subclasses. */
+static ObjClass *current_owner(VM *vm) {
+    return vm->frame_count ? vm->frames[vm->frame_count - 1].closure->fn->owner : NULL;
+}
+static bool access_ok(VM *vm, ObjClass *declaring, int access) {
+    if (!access)
+        return true;
+    ObjClass *o = current_owner(vm);
+    return o == declaring || (access == 2 && o && vm_is_instance(o, declaring));
+}
+static bool access_fail(VM *vm, const char *kind, ObjString *name, ObjClass *declaring, int access) {
+    if (access == 2)
+        return vm_throw(vm, "TypeError", "%s '%s' is protected: visible only in %s and its subclasses", kind,
+                        name->chars, declaring->name->chars);
+    return vm_throw(vm, "TypeError", "%s '%s' is private to class %s", kind, name->chars, declaring->name->chars);
+}
+static bool field_allowed(VM *vm, ObjClass *k, int i, ObjString *name) {
+    if (!k->field_access || !k->field_access[i] || access_ok(vm, k->field_owner[i], k->field_access[i]))
+        return true;
+    return access_fail(vm, "field", name, k->field_owner[i], k->field_access[i]);
+}
+static bool method_allowed(VM *vm, Value m, ObjString *name) {
+    if (!IS_OBJT(m, OBJ_CLOSURE))
+        return true;
+    ObjFunction *fn = ((ObjClosure *)AS_OBJ(m))->fn;
+    if (!fn->access || access_ok(vm, fn->owner, fn->access))
+        return true;
+    return access_fail(vm, "method", name, fn->owner, fn->access);
+}
+/* The class along k's linearization holding static `name`, or NULL. */
+static ObjClass *static_holder(ObjClass *k, ObjString *name, Value *out) {
+    for (int i = 0; i < (k->nmro ? k->nmro : 1); i++) {
+        ObjClass *c = k->nmro ? k->mro[i] : k;
         if (table_get(&c->statics, name, out))
-            return true;
+            return c;
+    }
+    return NULL;
+}
+static bool static_allowed(VM *vm, ObjClass *holder, ObjString *name) {
+    Value a;
+    if (!table_get(&holder->static_access, name, &a) || !(a.as.i & 3) || access_ok(vm, holder, (int)(a.as.i & 3)))
+        return true;
+    return access_fail(vm, "static member", name, holder, (int)(a.as.i & 3));
+}
+static bool get_class_static(VM *vm, ObjClass *k, ObjString *name, Value *out) {
+    ObjClass *holder = static_holder(k, name, out);
+    if (holder) {
+        if (!static_allowed(vm, holder, name)) {
+            *out = val_null();
+            return false;
+        }
+        return true;
     }
     if (!strcmp(name->chars, "from_json")) {
         ObjNative *n = new_native(vm, "from_json", lib_class_from_json, 2, 2);
@@ -1088,6 +1317,8 @@ bool vm_get_member(VM *vm, Value obj, ObjString *name, Value *out) {
             ObjInstance *in = AS_INSTANCE(obj);
             Value idx;
             if (table_get(&in->klass->field_index, name, &idx)) {
+                if (!field_allowed(vm, in->klass, (int)idx.as.i, name))
+                    return false;
                 Value v = in->fields[idx.as.i];
                 if (IS_UNDEF(v))
                     return vm_throw(vm, "RuntimeError", "field '%s' of %s is read before it is assigned",
@@ -1097,6 +1328,8 @@ bool vm_get_member(VM *vm, Value obj, ObjString *name, Value *out) {
             }
             Value m = vm_find_method(in->klass, name);
             if (!IS_NULL(m)) {
+                if (!method_allowed(vm, m, name))
+                    return false;
                 *out = val_obj(new_bound(vm, obj, m));
                 return true;
             }
@@ -1110,6 +1343,8 @@ bool vm_get_member(VM *vm, Value obj, ObjString *name, Value *out) {
         case OBJ_CLASS:
             if (get_class_static(vm, AS_CLASS(obj), name, out))
                 return true;
+            if (vm->has_error)
+                return false; /* not accessible */
             return vm_throw(vm, "TypeError", "%s has no member '%s'", AS_CLASS(obj)->name->chars, name->chars);
         case OBJ_ENUM: {
             ObjEnum *e = (ObjEnum *)AS_OBJ(obj);
@@ -2036,6 +2271,10 @@ static RunResult run(VM *vm, int base) {
             }
             Value idx;
             if (table_get(&in->klass->field_index, AS_STRING(CONST(nk)), &idx)) {
+                if (in->klass->field_access && in->klass->field_access[idx.as.i]) {
+                    SYNC();
+                    CHECK(field_allowed(vm, in->klass, (int)idx.as.i, AS_STRING(CONST(nk))));
+                }
                 c->klass = in->klass;
                 c->index = (int)idx.as.i;
             }
@@ -2060,6 +2299,7 @@ static RunResult run(VM *vm, int base) {
                 Value idx;
                 if (table_get(&in->klass->field_index, AS_STRING(CONST(nk)), &idx)) {
                     index = (int)idx.as.i;
+                    CHECK(field_allowed(vm, in->klass, index, AS_STRING(CONST(nk))));
                     c->klass = in->klass;
                     c->index = index;
                 }
@@ -2069,6 +2309,25 @@ static RunResult run(VM *vm, int base) {
                 THROW();
             }
             CHECK(set_field(vm, in, index, v));
+            vm->sp -= 2;
+            DISPATCH();
+        }
+        if (IS_OBJT(obj, OBJ_CLASS)) {
+            /* Class.field = value assigns a static field where it is declared */
+            ObjString *name = AS_STRING(CONST(nk));
+            Value old;
+            ObjClass *holder = static_holder(AS_CLASS(obj), name, &old);
+            if (!holder || IS_OBJT(old, OBJ_CLOSURE)) {
+                vm_throw(vm, "TypeError", "%s has no static field '%s'", AS_CLASS(obj)->name->chars, name->chars);
+                THROW();
+            }
+            CHECK(static_allowed(vm, holder, name));
+            Value a;
+            if (table_get(&holder->static_access, name, &a) && (a.as.i & 4)) {
+                vm_throw(vm, "TypeError", "static field '%s' of %s is constant", name->chars, holder->name->chars);
+                THROW();
+            }
+            table_set(vm, &holder->statics, name, v);
             vm->sp -= 2;
             DISPATCH();
         }
@@ -2448,6 +2707,7 @@ static RunResult run(VM *vm, int base) {
             else {
                 m = vm_find_method(in->klass, name);
                 if (!IS_NULL(m)) {
+                    CHECK(method_allowed(vm, m, name));
                     c->klass = in->klass;
                     c->index = -2;
                     c->value = m;
@@ -2466,6 +2726,7 @@ static RunResult run(VM *vm, int base) {
             }
             Value idx;
             if (table_get(&in->klass->field_index, name, &idx)) {
+                CHECK(field_allowed(vm, in->klass, (int)idx.as.i, name));
                 vm->sp[-1 - argc] = in->fields[idx.as.i];
                 CHECK(call_value(vm, argc, &pushed));
                 if (pushed)
@@ -2519,47 +2780,113 @@ static RunResult run(VM *vm, int base) {
         }
         DISPATCH();
     }
-    CASE(OP_SUPER_INVOKE) {
+    CASE(OP_SUPER_INVOKE)
+    CASE(OP_SUPER_INVOKE_AT) {
+        /* super.name(...): the next implementation along the defining class's linearization;
+         * super.Base.name(...) (the class on top of the stack) names the base; init with no
+         * constructor sets the base's fields in order. */
+        bool at = ip[-1] == OP_SUPER_INVOKE_AT;
         uint16_t nk = READ_U16();
         uint8_t argc = READ_BYTE();
         SYNC();
         ObjClass *owner = frame->closure->fn->owner;
         ObjString *name = AS_STRING(CONST(nk));
-        if (!owner || !owner->super) {
+        ObjClass *chosen = NULL;
+        if (at) {
+            Value c = POP();
+            if (!IS_OBJT(c, OBJ_CLASS)) {
+                vm_throw(vm, "TypeError", "super.X.%s needs a base class X", name->chars);
+                THROW();
+            }
+            chosen = AS_CLASS(c);
+        }
+        if (!owner || !owner->nsupers) {
             vm_throw(vm, "TypeError", "super used outside a subclass method");
             THROW();
         }
-        ObjClass *sup = owner->super;
-        Value m = vm_find_method(sup, name);
+        if (chosen) {
+            bool base = false;
+            for (int i = 1; i < owner->nmro; i++)
+                base = base || owner->mro[i] == chosen;
+            if (!base) {
+                vm_throw(vm, "TypeError", "'%s' is not a base class of %s", chosen->name->chars, owner->name->chars);
+                THROW();
+            }
+        }
+        Value m;
+        ObjClass *sup = chosen ? chosen : owner->supers[0];
+        if (name == vm->s_init || chosen)
+            m = vm_find_method(sup, name);
+        else
+            m = next_method(owner, owner, name, &sup);
         if (IS_NULL(m)) {
             if (name == vm->s_init) {
                 Value recv = PEEK(argc);
-                CHECK(vm_init_fields(vm, sup, AS_INSTANCE(recv), argc, vm->sp - argc));
+                CHECK(init_base_fields(vm, sup, AS_INSTANCE(recv), argc, vm->sp - argc));
                 vm->sp -= argc;
                 vm->sp[-1] = val_null();
                 DISPATCH();
             }
-            vm_throw(vm, "TypeError", "%s has no method '%s'", sup->name->chars, name->chars);
+            vm_throw(vm, "TypeError", "no base class of %s has a method '%s'", owner->name->chars, name->chars);
             THROW();
+        }
+        if (IS_OBJT(m, OBJ_NATIVE)) {
+            Value *args = vm->sp - argc - 1;
+            CHECK(call_native(vm, (ObjNative *)AS_OBJ(m), args, argc + 1, args));
+            vm->sp = args + 1;
+            DISPATCH();
         }
         CHECK(push_frame(vm, (ObjClosure *)AS_OBJ(m), argc));
         RELOAD();
         DISPATCH();
     }
     CASE(OP_SUPER_GET) {
+        /* super.field reads the receiver's field; super.method binds the next implementation */
         uint16_t nk = READ_U16();
         SYNC();
         ObjClass *owner = frame->closure->fn->owner;
-        if (!owner || !owner->super) {
+        if (!owner || !owner->nsupers) {
             vm_throw(vm, "TypeError", "super used outside a subclass method");
             THROW();
         }
-        Value m = vm_find_method(owner->super, AS_STRING(CONST(nk)));
+        Value recv = PEEK(0), idx;
+        if (IS_OBJT(recv, OBJ_INSTANCE) && table_get(&AS_INSTANCE(recv)->klass->field_index, AS_STRING(CONST(nk)), &idx)) {
+            vm->sp[-1] = AS_INSTANCE(recv)->fields[idx.as.i];
+            DISPATCH();
+        }
+        Value m = next_method(owner, owner, AS_STRING(CONST(nk)), NULL);
         if (IS_NULL(m)) {
-            vm_throw(vm, "TypeError", "%s has no method '%s'", owner->super->name->chars, AS_CSTR(CONST(nk)));
+            vm_throw(vm, "TypeError", "no base class of %s has a member '%s'", owner->name->chars, AS_CSTR(CONST(nk)));
             THROW();
         }
-        vm->sp[-1] = val_obj(new_bound(vm, PEEK(0), m));
+        vm->sp[-1] = val_obj(new_bound(vm, recv, m));
+        DISPATCH();
+    }
+    CASE(OP_DEFINE_STATIC) {
+        uint16_t nk = READ_U16();
+        Value v = POP(), k = POP();
+        table_set(vm, &AS_CLASS(k)->statics, AS_STRING(CONST(nk)), v);
+        DISPATCH();
+    }
+    CASE(OP_SPAWN) {
+        SYNC();
+        Value fn = PEEK(0), out = val_null();
+        ObjInstance *task = new_instance(vm, vm->task_class);
+        push_root(vm, val_obj(task));
+        task->fields[0] = val_null();
+        task->fields[1] = val_null();
+        if (!vm_call(vm, fn, 0, NULL, &out)) {
+            if (vm->exiting) {
+                pop_root(vm, 1);
+                THROW();
+            }
+            task->fields[1] = vm->error; /* rethrown by join() */
+            vm->error = val_null();
+            vm->has_error = false;
+        } else
+            task->fields[0] = out;
+        pop_root(vm, 1);
+        vm->sp[-1] = val_obj(task);
         DISPATCH();
     }
     CASE(OP_CALL_STMT) {
@@ -2881,9 +3208,20 @@ static RunResult run(VM *vm, int base) {
             vm_throw(vm, "TypeError", "%s can only extend a class", klass->name->chars);
             THROW();
         }
-        if (!AS_CLASS(base)->finalized)
-            finalize_class(vm, AS_CLASS(base));
-        klass->super = AS_CLASS(base);
+        if (!AS_CLASS(base)->finalized && !finalize_class(vm, AS_CLASS(base))) {
+            SYNC();
+            THROW();
+        }
+        for (int i = 0; i < klass->nsupers; i++)
+            if (klass->supers[i] == AS_CLASS(base)) {
+                SYNC();
+                vm_throw(vm, "TypeError", "duplicate base class '%s'", AS_CLASS(base)->name->chars);
+                THROW();
+            }
+        if (!klass->super)
+            klass->super = AS_CLASS(base);
+        klass->supers = xrealloc(klass->supers, sizeof(ObjClass *) * (size_t)(klass->nsupers + 1));
+        klass->supers[klass->nsupers++] = AS_CLASS(base);
         DISPATCH();
     }
     CASE(OP_IMPLEMENT) {
@@ -2903,7 +3241,10 @@ static RunResult run(VM *vm, int base) {
     CASE(OP_FINALIZE) {
         uint16_t k = READ_U16();
         ObjClass *klass = AS_CLASS(CONST(k));
-        finalize_class(vm, klass);
+        if (!finalize_class(vm, klass)) {
+            SYNC();
+            THROW();
+        }
         PUSH(val_obj(klass));
         DISPATCH();
     }
@@ -3388,12 +3729,89 @@ void vm_init(VM *vm, int argc, char **argv) {
     vm->s_length = str_intern_c(vm, "length");
     vm->s_message = str_intern_c(vm, "message");
     vm->s_name = str_intern_c(vm, "name");
+    {
+        /* thread.task, the value of `spawn call`: the call has already run */
+        ObjClass *k = new_class(vm, str_intern_c(vm, "thread.task"));
+        k->nfields = 2;
+        k->field_names = TB_ALLOC(vm, ObjString *, 2);
+        k->field_types = TB_ALLOC(vm, Value, 2);
+        k->field_has_default = TB_ALLOC(vm, bool, 2);
+        k->field_consts = TB_ALLOC(vm, Value, 2);
+        k->field_names[0] = str_intern_c(vm, "$result");
+        k->field_names[1] = str_intern_c(vm, "$error");
+        for (int i = 0; i < 2; i++) {
+            k->field_types[i] = val_null();
+            k->field_has_default[i] = true;
+            k->field_consts[i] = val_null();
+        }
+        k->finalized = true;
+        table_set(vm, &k->methods, str_intern_c(vm, "join"), val_obj(new_native(vm, "join", task_join, 1, 1)));
+        table_set(vm, &k->methods, str_intern_c(vm, "done"), val_obj(new_native(vm, "done", task_done, 1, 1)));
+        vm->task_class = k;
+    }
     lib_core_init(vm);
     vm->gc_off--;
     const char *stress = getenv("LITE_GC_STRESS");
     if (stress && strcmp(stress, "0") != 0) {
         vm->gc_stress = true;
         vm->next_gc = 0;
+    }
+}
+/* Runs an instance's destructors, most derived first. An error in one is reported and does not
+ * stop the program. */
+static void run_destructors(VM *vm, ObjInstance *inst) {
+    ObjClass *k = inst->klass;
+    ObjString *name = str_intern_c(vm, "$destroy");
+    Value saved = vm->error;
+    bool had = vm->has_error;
+    vm->error = val_null();
+    vm->has_error = false;
+    push_root(vm, val_obj(inst));
+    push_root(vm, saved);
+    for (int i = 0; i < (k->nmro ? k->nmro : 1); i++) {
+        ObjClass *c = k->nmro ? k->mro[i] : k;
+        Value m, out;
+        if (!declares_method(c, name, &m))
+            continue;
+        if (!vm_call(vm, val_obj(new_bound(vm, val_obj(inst), m)), 0, NULL, &out)) {
+            if (vm->exiting)
+                break;
+            ObjString *msg = error_message(vm, vm->error);
+            fprintf(stderr, "Flywheel: error in the destructor of %s: %s\n", k->name->chars,
+                    msg && msg->len ? msg->chars : error_type_name(vm, vm->error)->chars);
+            vm->error = val_null();
+            vm->has_error = false;
+        }
+    }
+    pop_root(vm, 2);
+    if (!vm->exiting) {
+        vm->error = saved;
+        vm->has_error = had;
+    }
+}
+void vm_run_finalizers(VM *vm) {
+    vm->finalizing = true;
+    while (vm->finalizers.count) {
+        Value v = vm->finalizers.items[--vm->finalizers.count];
+        push_root(vm, v);
+        run_destructors(vm, AS_INSTANCE(v));
+        pop_root(vm, 1);
+    }
+    vm->finalizing = false;
+}
+void vm_finalize_all(VM *vm) {
+    vm_run_finalizers(vm);
+    for (;;) {
+        ObjInstance *next = NULL;
+        for (Obj *o = vm->objects; o && !next; o = o->next)
+            if (o->type == OBJ_INSTANCE && !((ObjInstance *)o)->finalized && ((ObjInstance *)o)->klass->has_destructor)
+                next = (ObjInstance *)o;
+        if (!next || vm->exiting)
+            break;
+        next->finalized = true;
+        vm->finalizing = true;
+        run_destructors(vm, next);
+        vm->finalizing = false;
     }
 }
 void vm_free(VM *vm) {
@@ -3431,6 +3849,12 @@ RunResult vm_run_main(VM *vm, const char *path, const char *source, size_t len, 
         vm_report_error(vm, vm->error);
         return RUN_ERROR;
     }
+    /* Destructors of everything still alive run as the program ends. */
+    push_root(vm, out);
+    vm_finalize_all(vm);
+    pop_root(vm, 1);
+    if (vm->exiting)
+        return RUN_EXIT;
     *result = out;
     return RUN_OK;
 }

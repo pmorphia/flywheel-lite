@@ -129,13 +129,19 @@ there is no static type checker. So:
   declared, a product with no `unitconv`) raise `TypeError` when executed, with the compiler's
   wording. Quantity operators dispatch at run time to the hidden unit classes.
 - The compiler's warning for a `catch "Name"` that nothing throws is not reported.
-- `private` and `readonly` class members are not enforced (module-level `private` and `const` are).
+- `private`, `protected`, and private or protected `static` members are enforced when the access
+  runs (a `TypeError`), not at compile time; `readonly` fields are not enforced (module-level
+  `private` and `const` are).
 - `float` values are stored as `double`; `u64` values above the signed 64-bit range are not
   supported; `typeof` cannot name generic instances (`Box`, not `Box<int>`) or function types.
 - Memory is managed by a tracing collector instead of reference counting. Cycles are collected
   automatically, but a `weak<T>` clears when the collector runs rather than the moment the last
   strong reference goes away. `testing.live_objects()` collects first, so it reports what
-  reference counting would still hold.
+  reference counting would still hold. Likewise a `destructor` runs after the collector finds the
+  instance unreachable (at the next safepoint), or when the program ends, not the moment the last
+  reference drops.
+- There are no threads: `spawn call` runs the call at once and its `thread.task` holds the result
+  (or error) for `join()`.
 
 `tests/known_failures.txt` lists the conformance programs affected by these differences.
 
@@ -148,7 +154,7 @@ there is no static type checker. So:
   are skipped and counted);
 - Flywheel Lite's own cases in `tests/cases`, whose expected output was produced by the Flywheel compiler.
 
-Current result on Linux: 212 of 221 pass; the 9 others are the known differences above.
+Current result on Linux: 219 of 229 pass; the 10 others are the known differences above.
 `LITE_GC_STRESS=1` collects at every safepoint, which together with `make debug` checks that
 the runtime roots every live value.
 

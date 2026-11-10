@@ -58,6 +58,9 @@
     X(OP_INVOKE)         /* u16 name, u8 argc, u16 cache */                                       \
     X(OP_SUPER_INVOKE)   /* u16 name, u8 argc */                                                  \
     X(OP_SUPER_GET)      /* u16 name */                                                           \
+    X(OP_SUPER_INVOKE_AT) /* u16 name, u8 argc: [recv args.. base class] (super.Base.name) */            \
+    X(OP_DEFINE_STATIC)  /* u16 name: [class value] -> [] (a static field's initializer) */             \
+    X(OP_SPAWN)          /* [closure] -> [thread.task]: runs it now (Lite has no threads) */            \
     X(OP_CALL_STMT)      /* call with no arguments when callable */                               \
     X(OP_CLOSURE)        /* u16 fn, then (u8 is_local, u8 index) per upvalue */                   \
     X(OP_CLOSE_UPVAL)                                                                             \

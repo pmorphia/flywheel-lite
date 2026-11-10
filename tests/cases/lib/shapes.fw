@@ -8,7 +8,7 @@ class Rect implements Shape
     double width
     double height
     function area() returns double
-        return inst width * inst height
+        return this.width * this.height
     end
     function name() returns string
         return "rect"

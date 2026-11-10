@@ -5,14 +5,14 @@ class Animal
         return "..."
     end
     function describe() returns string
-        return "{inst name} ({inst legs} legs) says {inst speak()}"
+        return "{this.name} ({this.legs} legs) says {this.speak()}"
     end
 end
 
 class Bird extends Animal
     bool flies = true
-    function init(string name)
-        super.init(name, 2)
+    constructor(string name)
+        super.constructor(name, 2)
     end
     function speak() returns string
         return "tweet"
@@ -35,25 +35,25 @@ class Vec
     readonly int x
     readonly int y
     function operator +(Vec o) returns Vec
-        return Vec(inst x + o.x, inst y + o.y)
+        return Vec(this.x + o.x, this.y + o.y)
     end
     function operator -() returns Vec
-        return Vec(-inst x, -inst y)
+        return Vec(-this.x, -this.y)
     end
     function operator ==(Vec o) returns bool
-        return inst x == o.x and inst y == o.y
+        return this.x == o.x and this.y == o.y
     end
     function operator <(Vec o) returns bool
-        return inst x * inst x + inst y * inst y < o.x * o.x + o.y * o.y
+        return this.x * this.x + this.y * this.y < o.x * o.x + o.y * o.y
     end
     function hash() returns int
-        return inst x * 31 + inst y
+        return this.x * 31 + this.y
     end
     function equals(Vec o) returns bool
-        return inst x == o.x and inst y == o.y
+        return this.x == o.x and this.y == o.y
     end
     function to_string returns string
-        return "<{inst x},{inst y}>"
+        return "<{this.x},{this.y}>"
     end
 end
 var a = Vec(1, 2)
@@ -67,9 +67,9 @@ class Counter
     int value = 0
     int[] history = []
     function add(int n) returns int
-        inst value += n
-        inst history.push(n)
-        return inst value
+        this.value += n
+        this.history.push(n)
+        return this.value
     end
 end
 var c1 = Counter()
@@ -82,8 +82,8 @@ print c1.value, c1.history, c2.history, [1, 2, 3].map(c2.add)
 class Temperature
     double celsius
     string label = "temp"
-    function init(double fahrenheit)
-        inst celsius = (fahrenheit - 32.0) * 5.0 / 9.0
+    constructor(double fahrenheit)
+        this.celsius = (fahrenheit - 32.0) * 5.0 / 9.0
     end
 end
 print Temperature(212.0).celsius, Temperature(32.0).label
@@ -91,11 +91,11 @@ print Temperature(212.0).celsius, Temperature(32.0).label
 class Countdown
     int n
     function next() returns int?
-        if inst n == 0 do
+        if this.n == 0 do
             return null
         end
-        inst n -= 1
-        return inst n + 1
+        this.n -= 1
+        return this.n + 1
     end
 end
 for i in Countdown(3) do
@@ -105,7 +105,7 @@ end
 class Box<T>
     T value
     function map<U>(function(T) returns U f) returns Box<U>
-        return Box<U>(f(inst value))
+        return Box<U>(f(this.value))
     end
 end
 print Box(21).map(function(int x) => x * 2).value

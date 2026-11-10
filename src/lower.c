@@ -392,27 +392,27 @@ static void generate_units(Parser *P, Program *p, const UnitNs *imported, int ni
         }
         buf_printf(out, "]\n");
         char at_self[128], at_other[128];
-        snprintf(at_self, sizeof at_self, "[inst __fwu_unit * %d + j]", count);
-        snprintf(at_other, sizeof at_other, "[inst __fwu_unit * %d + o.__fwu_unit]", count);
+        snprintf(at_self, sizeof at_self, "[this.__fwu_unit * %d + j]", count);
+        snprintf(at_other, sizeof at_other, "[this.__fwu_unit * %d + o.__fwu_unit]", count);
         for (int kind = 0; kind < 2; kind++) {
             bool is_int = kind == 0;
             char C[160], D[160];
             snprintf(C, sizeof C, "__fwu_%s__%s", N, is_int ? "int" : "double");
             snprintf(D, sizeof D, "__fwu_%s__double", N);
             const char *T = is_int ? "int" : "double";
-            const char *number = is_int ? "double(inst value)" : "inst value";
+            const char *number = is_int ? "double(this.value)" : "this.value";
             buf_printf(out,
                        "class %s\n"
                        "    readonly %s value\n"
                        "    readonly int __fwu_unit\n"
                        "    function to_string returns string\n"
-                       "        return \"{inst value}\" + __fwu_%s__names[inst __fwu_unit]\n"
+                       "        return \"{this.value}\" + __fwu_%s__names[this.__fwu_unit]\n"
                        "    end\n"
                        "    function operator -() returns %s\n"
-                       "        return %s(-inst value, inst __fwu_unit)\n"
+                       "        return %s(-this.value, this.__fwu_unit)\n"
                        "    end\n"
                        "    function __fwu_unit_name() returns string\n"
-                       "        return __fwu_%s__names[inst __fwu_unit]\n"
+                       "        return __fwu_%s__names[this.__fwu_unit]\n"
                        "    end\n"
                        "    function __fwu_type() returns string\n"
                        "        return \"%s\"\n"
@@ -424,7 +424,7 @@ static void generate_units(Parser *P, Program *p, const UnitNs *imported, int ni
                        "        return %s * __fwu_%s__num%s / __fwu_%s__den%s\n"
                        "    end\n"
                        "    function __fwu_base() returns double\n"
-                       "        return %s * __fwu_%s__factor[inst __fwu_unit]\n"
+                       "        return %s * __fwu_%s__factor[this.__fwu_unit]\n"
                        "    end\n"
                        /* `x in cm`: the unit by name */
                        "    function __fwu_to_named(string u) returns %s\n"
@@ -432,22 +432,22 @@ static void generate_units(Parser *P, Program *p, const UnitNs *imported, int ni
                        "        if j < 0 do\n"
                        "            throw ValueError(\"unit namespace '%s' has no unit '\" + u + \"'\")\n"
                        "        end\n"
-                       "        return inst __fwu_to(j)\n"
+                       "        return this.__fwu_to(j)\n"
                        "    end\n",
                        C, T, N, C, C, N, is_int ? "int" : "float", N, number, N, at_self, N, at_self,
                        number, N, D, N, N);
             if (is_int) {
                 buf_printf(out,
                            "    function __fwu_exact(int j) returns int\n"
-                           "        if inst __fwu_unit == j do\n"
-                           "            return inst value\n"
+                           "        if this.__fwu_unit == j do\n"
+                           "            return this.value\n"
                            "        end\n"
                            "        var m = __fwu_%s__mul%s\n"
                            "        if m == 0 do\n"
-                           "            throw ValueError(\"{inst value}\" + __fwu_%s__names[inst __fwu_unit] + \" is not "
+                           "            throw ValueError(\"{this.value}\" + __fwu_%s__names[this.__fwu_unit] + \" is not "
                            "a whole number of \" + __fwu_%s__names[j] + \"; use %s[%s]\")\n"
                            "        end\n"
-                           "        return inst value * m\n"
+                           "        return this.value * m\n"
                            "    end\n",
                            N, at_self, N, N, "float", N);
                 const char *ops[2][2] = {{"add", "+"}, {"sub", "-"}};
@@ -455,7 +455,7 @@ static void generate_units(Parser *P, Program *p, const UnitNs *imported, int ni
                     buf_printf(out,
                                "    function __fwu_%s(%s o) returns %s\n"
                                "        var j = __fwu_%s__finer%s\n"
-                               "        return %s(inst __fwu_exact(j) %s o.__fwu_exact(j), j)\n"
+                               "        return %s(this.__fwu_exact(j) %s o.__fwu_exact(j), j)\n"
                                "    end\n",
                                ops[o][0], C, C, N, at_other, C, ops[o][1]);
                 char at_o_j[128];
@@ -464,31 +464,31 @@ static void generate_units(Parser *P, Program *p, const UnitNs *imported, int ni
                            "    function __fwu_cmp(%s o) returns int\n"
                            "        var j = __fwu_%s__finer%s\n"
                            "        if __fwu_%s__mul%s != 0 and __fwu_%s__mul%s != 0 do\n"
-                           "            var a = inst __fwu_exact(j)\n"
+                           "            var a = this.__fwu_exact(j)\n"
                            "            var b = o.__fwu_exact(j)\n"
                            "            if a < b do\n                return -1\n            end\n"
                            "            if a > b do\n                return 1\n            end\n"
                            "            return 0\n"
                            "        end\n"
-                           "        var x = inst __fwu_real(j)\n"
+                           "        var x = this.__fwu_real(j)\n"
                            "        var y = o.__fwu_real(j)\n"
                            "        if x < y do\n            return -1\n        end\n"
                            "        if x > y do\n            return 1\n        end\n"
                            "        return 0\n"
                            "    end\n"
                            "    function __fwu_scale(int k) returns %s\n"
-                           "        return %s(inst value * k, inst __fwu_unit)\n"
+                           "        return %s(this.value * k, this.__fwu_unit)\n"
                            "    end\n"
                            "    function __fwu_floordiv(int k) returns %s\n"
-                           "        return %s(inst value // k, inst __fwu_unit)\n"
+                           "        return %s(this.value // k, this.__fwu_unit)\n"
                            "    end\n",
                            C, N, at_other, N, at_self, N, at_o_j, C, C, C, C);
                 buf_printf(out,
                            "    function __fwu_float() returns %s\n"
-                           "        return %s(double(inst value), inst __fwu_unit)\n"
+                           "        return %s(double(this.value), this.__fwu_unit)\n"
                            "    end\n"
                            "    function __fwu_to(int j) returns %s\n"
-                           "        return %s(inst __fwu_real(j), j)\n"
+                           "        return %s(this.__fwu_real(j), j)\n"
                            "    end\n",
                            D, D, D, D);
             } else {
@@ -497,26 +497,26 @@ static void generate_units(Parser *P, Program *p, const UnitNs *imported, int ni
                     buf_printf(out,
                                "    function __fwu_%s(%s o) returns %s\n"
                                "        var j = __fwu_%s__finer%s\n"
-                               "        return %s(inst __fwu_real(j) %s o.__fwu_real(j), j)\n"
+                               "        return %s(this.__fwu_real(j) %s o.__fwu_real(j), j)\n"
                                "    end\n",
                                ops[o][0], C, C, N, at_other, C, ops[o][1]);
                 buf_printf(out,
                            "    function __fwu_cmp(%s o) returns int\n"
                            "        var j = __fwu_%s__finer%s\n"
-                           "        var x = inst __fwu_real(j)\n"
+                           "        var x = this.__fwu_real(j)\n"
                            "        var y = o.__fwu_real(j)\n"
                            "        if x < y do\n            return -1\n        end\n"
                            "        if x > y do\n            return 1\n        end\n"
                            "        return 0\n"
                            "    end\n"
                            "    function __fwu_scale(double k) returns %s\n"
-                           "        return %s(inst value * k, inst __fwu_unit)\n"
+                           "        return %s(this.value * k, this.__fwu_unit)\n"
                            "    end\n"
                            "    function __fwu_divide(double k) returns %s\n"
-                           "        return %s(inst value / k, inst __fwu_unit)\n"
+                           "        return %s(this.value / k, this.__fwu_unit)\n"
                            "    end\n"
                            "    function __fwu_to(int j) returns %s\n"
-                           "        return %s(inst __fwu_real(j), j)\n"
+                           "        return %s(this.__fwu_real(j), j)\n"
                            "    end\n",
                            C, N, at_other, C, C, C, C, C, C);
                 /* equivalences: this value in another namespace's unit (o's), and o in this one's */
@@ -529,11 +529,11 @@ static void generate_units(Parser *P, Program *p, const UnitNs *imported, int ni
                     real_text(eq[e].k, k1, sizeof k1);
                     buf_printf(out,
                                "    function __fwu_as__%s(%s__fwu_%s__double o) returns %s__fwu_%s__double\n"
-                               "        return %s__fwu_%s__double(inst __fwu_base() * %s / %s__fwu_%s__factor[o.__fwu_unit], "
+                               "        return %s__fwu_%s__double(this.__fwu_base() * %s / %s__fwu_%s__factor[o.__fwu_unit], "
                                "o.__fwu_unit)\n"
                                "    end\n"
                                "    function __fwu_from__%s(%s__fwu_%s__double o) returns %s\n"
-                               "        return %s(o.__fwu_base() / %s / __fwu_%s__factor[inst __fwu_unit], inst __fwu_unit)\n"
+                               "        return %s(o.__fwu_base() / %s / __fwu_%s__factor[this.__fwu_unit], this.__fwu_unit)\n"
                                "    end\n",
                                o->key, ref, o->name, ref, o->name, ref, o->name, k1, ref, o->name, o->key, ref, o->name,
                                C, C, k1, N);
@@ -543,7 +543,7 @@ static void generate_units(Parser *P, Program *p, const UnitNs *imported, int ni
                         continue;
                     buf_printf(out,
                                "    function __fwu_%s__%s(__fwu_%s__double o) returns __fwu_%s__double\n"
-                               "        return __fwu_%s__double(inst __fwu_base() %s o.__fwu_base() * %s / "
+                               "        return __fwu_%s__double(this.__fwu_base() %s o.__fwu_base() * %s / "
                                "__fwu_%s__factor[%d], %d)\n"
                                "    end\n",
                                !strcmp(rel[r].op, "*") ? "mul" : "div", rel[r].right, rel[r].right, rel[r].result,
@@ -554,14 +554,14 @@ static void generate_units(Parser *P, Program *p, const UnitNs *imported, int ni
             buf_printf(out,
                        "    function __fwu_ratio(%s o) returns double\n"
                        "        var j = __fwu_%s__finer%s\n"
-                       "        return inst __fwu_real(j) / o.__fwu_real(j)\n"
+                       "        return this.__fwu_real(j) / o.__fwu_real(j)\n"
                        "    end\n"
                        "    function equals(%s o) returns bool\n"
-                       "        return inst __fwu_cmp(o) == 0\n"
+                       "        return this.__fwu_cmp(o) == 0\n"
                        "    end\n"
                        /* Equal quantities hash alike: the base value, normalized to 12 digits. */
                        "    function hash() returns int\n"
-                       "        var h = inst __fwu_base()\n"
+                       "        var h = this.__fwu_base()\n"
                        "        if h < 0.0 do\n            h = -h\n        end\n"
                        "        if h == 0.0 or h != h or h > 1e300 do\n            return 0\n        end\n"
                        "        while h >= 1000000000000.0 do\n            h = h / 10.0\n        end\n"

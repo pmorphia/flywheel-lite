@@ -9,3 +9,4 @@ positive/closures_higher_order     # typeof(lambda) needs the static function ty
 positive/weak_references           # weak references clear at collection, not when the last strong reference drops
 positive/cycle_collection          # live_objects() collects first, so unreachable cycles are never counted
 trap/narrowed_global_changed       # flow-typing traps on narrowed globals need static types
+positive/destructors           # destructors run at collection or exit, not when the last reference drops

@@ -157,13 +157,15 @@ static void disasm_function(VM *vm, ObjFunction *fn, int depth) {
             printf(" %s/%d", AS_CSTR(c->constants.items[k]), argc);
             break;
         }
-        case OP_SUPER_INVOKE: {
+        case OP_SUPER_INVOKE:
+        case OP_SUPER_INVOKE_AT: {
             int k = U16();
             int argc = c->code[i++];
             printf(" %s/%d", AS_CSTR(c->constants.items[k]), argc);
             break;
         }
-        case OP_SUPER_GET: {
+        case OP_SUPER_GET:
+        case OP_DEFINE_STATIC: {
             int k = U16();
             printf(" %s", AS_CSTR(c->constants.items[k]));
             break;

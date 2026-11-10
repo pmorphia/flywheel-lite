@@ -148,7 +148,7 @@ static Token *expect(Parser *P, const char *s) {
 static const char *reserved_words[] = {
     "import", "as", "var", "const", "class", "function", "component", "returns", "return", "if",
     "else", "while", "do", "for", "in", "end", "break", "continue", "try", "catch",
-    "finally", "throw", "inst", "attr", "true", "false", "null", "public", "private", "void",
+    "finally", "throw", "this", "attr", "true", "false", "null", "void",
     "weak", "and", "or", "not", "enum", "interface", "extends", "implements", "match", "case",
     "super", "is", "elements", "defer", "which", NULL};
 static bool in_list(const Token *t, const char **list) {
@@ -196,11 +196,13 @@ static bool speculate(Parser *P, SpecFn fn, void *ctx) {
     jmp_buf *saved = P->jmp;
     int pos = P->pos;
     int nbody = P->nbody, which_depth = P->which_depth;
+    bool no_ternary = P->no_ternary;
     if (setjmp(jb)) {
         P->jmp = saved;
         P->pos = pos;
         P->nbody = nbody;
         P->which_depth = which_depth;
+        P->no_ternary = no_ternary;
         return false;
     }
     P->jmp = &jb;
@@ -378,7 +380,7 @@ static void spec_typed_decl(Parser *P, void *ctx) {
     *(bool *)ctx = yes;
 }
 static bool typed_declaration(Parser *P) {
-    if (ptext(P, 0, "inst") || ptext(P, 0, "attr") || ptext(P, 0, "super"))
+    if (ptext(P, 0, "this") || ptext(P, 0, "attr") || ptext(P, 0, "super"))
         return false;
     int pos = P->pos;
     bool yes = false;
@@ -788,6 +790,7 @@ static Node *parse_markup(Parser *P) {
 /* ---------------------------------------------------------------- expressions */
 
 static Node *lambda(Parser *P);
+static Node *spawn(Parser *P);
 
 static Node *prefix(Parser *P) {
     Token *t = peek(P, 0);
@@ -879,11 +882,41 @@ static Node *prefix(Parser *P) {
             }
             expect(P, "}");
         }
-    } else if (accept(P, "inst") || accept(P, "attr")) {
+    } else if (t->kind == T_ID && tis(t, "inst") && peek(P, 1)->kind == T_ID && peek(P, 1)->line == t->line) {
+        pfail_at(P, t->line, t->col, "'inst' was removed: write this.%.*s", peek(P, 1)->len, peek(P, 1)->text);
+    } else if (accept(P, "attr")) {
         Token *name = identifier(P);
-        e = tnode(P, tis(t, "inst") ? N_INST : N_ATTR, tstr(P, name), t);
+        e = tnode(P, N_ATTR, tstr(P, name), t);
+    } else if (accept(P, "this")) {
+        /* `this.name` reads a field or binds a method of the receiver; `this` alone is it */
+        if (ptext(P, 0, ".") && peek(P, 1)->kind == T_ID) {
+            take(P);
+            Token *m = identifier(P);
+            e = tnode(P, N_INST, tstr(P, m), m);
+        } else
+            e = tnode(P, N_THIS, "", t);
     } else if (accept(P, "super")) {
         e = tnode(P, N_SUPER, "", t);
+        if (ptext(P, 0, ".") && peek(P, 1)->kind == T_ID) {
+            /* super.constructor(...) runs a base constructor (init); super.Base.member names
+             * the base class */
+            take(P);
+            Token *m = identifier(P);
+            if (tis(m, "init"))
+                pfail_at(P, m->line, m->col, "constructors are called with super.constructor(...)%s", "");
+            Node *n = tnode(P, N_MEMBER, tis(m, "constructor") ? "init" : tstr(P, m), m);
+            nl_push(P->arena, &n->args, e);
+            e = n;
+            if (ptext(P, 0, ".") && ptext(P, 1, "constructor")) {
+                take(P);
+                Token *c = take(P);
+                Node *o = tnode(P, N_MEMBER, "init", c);
+                nl_push(P->arena, &o->args, e);
+                e = o;
+            }
+        }
+    } else if (t->kind == T_ID && tis(t, "spawn") && peek(P, 1)->kind == T_ID && peek(P, 1)->line == t->line) {
+        e = spawn(P);
     } else if (t->kind == T_ID && tis(t, "function") && ptext(P, 1, "(")) {
         e = lambda(P);
     } else if (t->kind == T_ID && tis(t, "weak") && ptext(P, 1, "(")) {
@@ -891,7 +924,7 @@ static Node *prefix(Parser *P) {
         e = tnode(P, N_NAME, "weak", t);
     } else if (t->kind == T_ID) {
         static const char *structural[] = {
-            "function", "class", "component", "import", "public", "private", "returns", "return",
+            "function", "class", "component", "import", "returns", "return",
             "if", "else", "while", "do", "for", "in", "end", "break", "continue", "try",
             "catch", "finally", "throw", "as", "void", "weak", "and", "or", "enum", "interface",
             "extends", "implements", "match", "case", "is", "which", NULL};
@@ -973,6 +1006,21 @@ static Node *expression(Parser *P, int level) {
     Node *e = operators(P, prefix(P), level);
     while (level == 0 && peek(P, 0)->kind == T_ID && tis(peek(P, 0), "which"))
         e = which(P, e);
+    /* `x if condition else y`: the lowest precedence, right associative */
+    if (level == 0 && !P->no_ternary && peek(P, 0)->kind == T_ID && tis(peek(P, 0), "if")) {
+        Token *t = take(P);
+        Node *n = tnode(P, N_TERNARY, "", t);
+        P->no_ternary = true;
+        Node *c = expression(P, 0);
+        P->no_ternary = false;
+        if (!(peek(P, 0)->kind == T_ID && tis(peek(P, 0), "else")))
+            pfail(P, "'x if condition' needs 'else': x if condition else y%s", "");
+        take(P);
+        nl_push(P->arena, &n->args, c);
+        nl_push(P->arena, &n->args, e);
+        nl_push(P->arena, &n->args, expression(P, 0));
+        e = n;
+    }
     return e;
 }
 static Node *operators(Parser *P, Node *e, int level) {
@@ -1093,6 +1141,11 @@ static bool argument_start(const Token *t) {
 }
 static Node *outer(Parser *P) {
     Token *first = peek(P, 0);
+    if (first->kind == T_ID && tis(first, "spawn") && peek(P, 1)->kind == T_ID && peek(P, 1)->line == first->line) {
+        Node *e = expression(P, 0);
+        e->outer = true;
+        return e;
+    }
     bool callable = is_callable_name(P, first);
     Node *e;
     int width = callee_width(P);
@@ -1484,10 +1537,13 @@ static Node *statement(Parser *P) {
             s->catch_names[i] = b.name;
             memset(&s->patterns[i], 0, sizeof(NodeList));
             memset(&s->catches[i], 0, sizeof(NodeList));
-            if (!b.type)
+            if (!b.type) {
+                P->no_ternary = true;
                 do {
                     nl_push(P->arena, &s->patterns[i], expression(P, 0));
                 } while (accept(P, ","));
+                P->no_ternary = false;
+            }
             s->guards[i] = accept(P, "if") ? expression(P, 0) : NULL;
             expect(P, "do");
             finish(P);
@@ -1687,6 +1743,84 @@ static Node *statement(Parser *P) {
     return s;
 }
 
+/* `spawn f(x)`, `spawn worker`, `spawn obj.method`, or `spawn function() ... end`. Flywheel
+ * Lite has no threads: the call runs at once and the task holds its result (or error) for
+ * join(). */
+static Node *spawn(Parser *P) {
+    Token *t = take(P);
+    Node *target;
+    if (ptext(P, 0, "function") && ptext(P, 1, "(")) {
+        target = tnode(P, N_CALL, "", peek(P, 0));
+        nl_push(P->arena, &target->args, lambda(P));
+    } else {
+        static const char *keywords[] = {"import", "var", "const", "class", "return", "if", "else", "while",
+                                         "do", "for", "end", "break", "continue", "try", "catch",
+                                         "finally", "throw", "match", "case", NULL};
+        if (in_list(peek(P, 0), keywords))
+            pfail(P, "'spawn' expects a function call or a function, such as 'spawn work(5)'%s", "");
+        target = outer(P);
+        if ((target->kind == N_NAME || target->kind == N_MEMBER || target->kind == N_INST) && !target->grouped) {
+            Node *c = node(P, N_CALL, "", target->line, target->col);
+            nl_push(P->arena, &c->args, target);
+            target = c;
+        }
+        if (target->kind != N_CALL)
+            pfail_at(P, t->line, t->col, "'spawn' expects a function call or a function, such as 'spawn work(5)'%s", "");
+    }
+    FuncDecl *f = arena_alloc(P->arena, sizeof(FuncDecl));
+    f->line = t->line;
+    f->name = "lambda";
+    Node *r = node(P, S_RETURN, NULL, target->line, target->col);
+    r->expr = target;
+    nl_push(P->arena, &f->body, r);
+    Node *e = tnode(P, N_SPAWN, "", t);
+    e->fn = f;
+    return e;
+}
+/* Access modifiers and `static` are soft keywords: they modify a declaration that follows on
+ * the same line. */
+static bool modifier_ahead(Parser *P) {
+    Token *t = peek(P, 0);
+    return t->kind == T_ID &&
+           (tis(t, "public") || tis(t, "private") || tis(t, "protected") || tis(t, "static")) &&
+           peek(P, 1)->kind == T_ID && peek(P, 1)->line == t->line;
+}
+/* Decorators before `function name` / `class name` on the same line; the nearest applies
+ * first. */
+static int decorators(Parser *P, Node ***out) {
+    Token *first = peek(P, 0);
+    if (first->kind != T_ID || tis(first, "function") || tis(first, "class"))
+        return 0;
+    int depth = 0;
+    bool found = false;
+    for (int n = 0;; n++) {
+        Token *t = peek(P, n);
+        if (t->kind == T_NL || t->kind == T_EOF)
+            break;
+        if (t->kind == T_OP && (tis(t, "(") || tis(t, "[") || tis(t, "{")))
+            depth++;
+        else if (t->kind == T_OP && (tis(t, ")") || tis(t, "]") || tis(t, "}")))
+            depth--;
+        else if (depth == 0 && n > 0 && t->kind == T_ID && (tis(t, "function") || tis(t, "class")) &&
+                 peek(P, n + 1)->kind == T_ID) {
+            found = true;
+            break;
+        } else if (depth == 0 && t->kind == T_OP && tis(t, "="))
+            break;
+    }
+    if (!found)
+        return 0;
+    int count = 0, cap = 0;
+    Node **items = NULL;
+    while (!ptext(P, 0, "function") && !ptext(P, 0, "class")) {
+        if (peek(P, 0)->kind != T_ID)
+            pfail(P, "expected a decorator name before 'function' or 'class'%s", "");
+        GROWV(P->arena, items, count, cap, Node *);
+        items[count++] = prefix(P);
+    }
+    *out = items;
+    return count;
+}
 static Node *lambda(Parser *P) {
     Token *t = expect(P, "function");
     FuncDecl *f = arena_alloc(P->arena, sizeof(FuncDecl));
@@ -1733,6 +1867,45 @@ static Node *lambda(Parser *P) {
     return e;
 }
 
+static void parse_params(Parser *P, FuncDecl *f, bool parens) {
+    int cap = 0;
+    if (parens ? accept(P, ")") : (peek(P, 0)->kind == T_NL || peek(P, 0)->kind == T_EOF))
+        return;
+    do {
+        GROWV(P->arena, f->params, f->nparams, cap, Param);
+        Param *p = &f->params[f->nparams++];
+        memset(p, 0, sizeof *p);
+        p->line = peek(P, 0)->line;
+        p->type = parse_type(P);
+        p->name = tstr(P, identifier(P));
+        if (accept(P, "="))
+            p->value = expression(P, 0);
+    } while (accept(P, ","));
+    if (parens)
+        expect(P, ")");
+}
+/* `constructor(int x)`, `constructor int x`, or `constructor`; `destructor` takes nothing.
+ * They are the methods init and $destroy. */
+static FuncDecl *parse_special(Parser *P, const char *owner, const char *keyword) {
+    Token *t = expect(P, keyword);
+    FuncDecl *f = arena_alloc(P->arena, sizeof(FuncDecl));
+    f->line = t->line;
+    f->owner = owner;
+    bool ctor = !strcmp(keyword, "constructor");
+    f->name = ctor ? "init" : "$destroy";
+    f->result = "void";
+    bool parens = accept(P, "(");
+    if (!ctor && !(parens ? ptext(P, 0, ")") : (peek(P, 0)->kind == T_NL || peek(P, 0)->kind == T_EOF)))
+        pfail(P, "a destructor takes no parameters%s", "");
+    parse_params(P, f, parens);
+    if (ptext(P, 0, "returns"))
+        pfail(P, "%ss cannot return a value", keyword);
+    finish(P);
+    block(P, &f->body);
+    expect(P, "end");
+    finish(P);
+    return f;
+}
 static FuncDecl *parse_function(Parser *P, const char *owner, bool signature_only) {
     Token *t = expect(P, "function");
     FuncDecl *f = arena_alloc(P->arena, sizeof(FuncDecl));
@@ -1760,6 +1933,8 @@ static FuncDecl *parse_function(Parser *P, const char *owner, bool signature_onl
         f->name = arena_strndup(P->arena, name, strlen(name));
     } else
         f->name = tstr(P, identifier(P));
+    if (owner && !strcmp(f->name, "init"))
+        pfail_at(P, f->line, t->col, "constructors are declared with constructor(...) ... end, not function init%s", "");
     skip_type_params(P);
     int cap = 0;
     if (accept(P, "(")) {
@@ -1857,10 +2032,46 @@ static bool parse_program_with(Arena *arena, const char *src, size_t len, Progra
     int cap_imp = 0, cap_fn = 0, cap_cls = 0, cap_en = 0, cap_comp = 0, cap_priv = 0, cap_fam = 0;
     newlines(&P);
     while (peek(&P, 0)->kind != T_EOF) {
-        bool hidden = accept(&P, "private");
-        bool visible = !hidden && accept(&P, "public");
+        bool hidden = false, visible = false;
+        if (modifier_ahead(&P)) {
+            if (ptext(&P, 0, "protected") || ptext(&P, 0, "static"))
+                pfail_at(&P, peek(&P, 0)->line, peek(&P, 0)->col, "'%.*s' applies to class members", peek(&P, 0)->len, peek(&P, 0)->text);
+            hidden = tis(take(&P), "private");
+            visible = !hidden;
+        }
         int nf = out->nfunctions, nc = out->nclasses, nb = out->body.count, ne = out->nenums,
             ncomp = out->ncomponents;
+        Node **decos = NULL;
+        int ndecos = decorators(&P, &decos);
+        if (ndecos && ptext(&P, 0, "function")) {
+            /* f = decorator(f): the function is renamed and `f` becomes a constant */
+            FuncDecl *f = parse_function(&P, NULL, false);
+            const char *name = f->name;
+            size_t nl = strlen(name);
+            char *renamed = arena_alloc(arena, nl + 13);
+            memcpy(renamed, name, nl);
+            memcpy(renamed + nl, "$undecorated", 13);
+            f->name = renamed;
+            Node *value = node(&P, N_NAME, renamed, f->line, 1);
+            for (int i = ndecos - 1; i >= 0; i--) {
+                Node *c = node(&P, N_CALL, "", decos[i]->line, decos[i]->col);
+                nl_push(arena, &c->args, decos[i]);
+                nl_push(arena, &c->args, value);
+                value = c;
+            }
+            GROWV(arena, out->functions, out->nfunctions, cap_fn, FuncDecl);
+            out->functions[out->nfunctions++] = *f;
+            Node *d = node(&P, S_DECLARE, NULL, f->line, 1);
+            d->name = name;
+            d->op = "const";
+            d->expr = value;
+            push_statement(&P, &out->body, d);
+            if (hidden) {
+                GROWV(arena, out->privates, out->nprivates, cap_priv, const char *);
+                out->privates[out->nprivates++] = name;
+            }
+            continue;
+        }
         if ((hidden || visible) && ptext(&P, 0, "import"))
             pfail(&P, "visibility applies to declarations, not imports%s", "");
         if (accept(&P, "import")) {
@@ -2056,7 +2267,9 @@ static bool parse_program_with(Arena *arena, const char *src, size_t len, Progra
                     snprintf(vn, vl, "%s.%s", en.name, en.members[i]);
                     v.name = vn;
                     v.line = lines[i];
-                    v.base = en.name;
+                    v.bases = arena_alloc(arena, sizeof(char *));
+                    v.bases[0] = en.name;
+                    v.nbases = 1;
                     v.variant_of = en.name;
                     v.fields = payloads[i];
                     v.nfields = npay[i];
@@ -2242,6 +2455,8 @@ static bool parse_program_with(Arena *arena, const char *src, size_t len, Progra
             finish(&P);
             GROWV(arena, out->classes, out->nclasses, cap_cls, ClassDecl);
             out->classes[out->nclasses++] = c;
+        } else if (ndecos && !ptext(&P, 0, "class")) {
+            pfail(&P, "decorators apply to functions and classes%s", "");
         } else if (ptext(&P, 0, "class") || ptext(&P, 0, "interface")) {
             ClassDecl c;
             memset(&c, 0, sizeof c);
@@ -2249,8 +2464,12 @@ static bool parse_program_with(Arena *arena, const char *src, size_t len, Progra
             c.line = peek(&P, 0)->line;
             c.name = tstr(&P, identifier(&P));
             skip_type_params(&P);
+            int capb = 0;
             if (!c.is_interface && accept(&P, "extends"))
-                c.base = parse_type(&P);
+                do {
+                    GROWV(arena, c.bases, c.nbases, capb, const char *);
+                    c.bases[c.nbases++] = parse_type(&P);
+                } while (accept(&P, ","));
             int capi = 0;
             if (accept(&P, c.is_interface ? "extends" : "implements"))
                 do {
@@ -2258,30 +2477,125 @@ static bool parse_program_with(Arena *arena, const char *src, size_t len, Progra
                     c.interfaces[c.ninterfaces++] = parse_type(&P);
                 } while (accept(&P, ","));
             finish(&P);
-            int capf = 0, capm = 0;
+            int capf = 0, capm = 0, capsm = 0, capsf = 0;
+            NodeList inits = {0}; /* static field initializers, run where the class is declared */
             while (!ptext(&P, 0, "end") && peek(&P, 0)->kind != T_EOF) {
                 Token *mod = peek(&P, 0);
-                bool hidden_member = accept(&P, "private");
-                if (!hidden_member)
-                    accept(&P, "public");
-                bool readonly = ptext(&P, 0, "readonly") && peek(&P, 1)->kind == T_ID && accept(&P, "readonly");
-                if ((hidden_member || readonly) && c.is_interface)
+                /* public / private / protected, static, readonly, constructor, and destructor
+                 * are soft keywords */
+                const char *access = NULL;
+                bool is_static = false, readonly = false;
+                for (;;) {
+                    if (modifier_ahead(&P)) {
+                        Token *m = take(&P);
+                        if (tis(m, "static")) {
+                            if (is_static)
+                                pfail_at(&P, m->line, m->col, "duplicate 'static'%s", "");
+                            is_static = true;
+                        } else {
+                            if (access)
+                                pfail_at(&P, m->line, m->col, "a member has one access modifier%s", "");
+                            access = tstr(&P, m);
+                        }
+                    } else if (ptext(&P, 0, "readonly") && peek(&P, 1)->kind == T_ID &&
+                               peek(&P, 1)->line == peek(&P, 0)->line) {
+                        take(&P);
+                        readonly = true;
+                    } else
+                        break;
+                }
+                bool hidden_member = access && !strcmp(access, "private");
+                bool protected_member = access && !strcmp(access, "protected");
+                if ((access || readonly || is_static) && c.is_interface)
                     pfail_at(&P, mod->line, mod->col, "interface members cannot have modifiers%s", "");
-                if (ptext(&P, 0, "function") && !ptext(&P, 1, "(")) {
-                    if (readonly)
-                        pfail_at(&P, mod->line, mod->col, "readonly applies to fields%s", "");
-                    FuncDecl *m = parse_function(&P, c.name, c.is_interface);
+                Token *k = peek(&P, 0);
+                bool special = k->kind == T_ID && (tis(k, "constructor") || tis(k, "destructor")) &&
+                               (peek(&P, 1)->kind == T_NL || peek(&P, 1)->kind == T_EOF || ptext(&P, 1, "(") ||
+                                peek(&P, 1)->kind == T_ID);
+                if (special && c.is_interface)
+                    pfail_at(&P, k->line, k->col, "interfaces cannot declare %.*ss", k->len, k->text);
+                if (special) {
+                    if (readonly || is_static)
+                        pfail_at(&P, mod->line, mod->col, "'%s' does not apply to %.*ss",
+                                 readonly ? "readonly" : "static", k->len, k->text);
+                    bool dtor = tis(k, "destructor");
+                    if (dtor && access)
+                        pfail_at(&P, mod->line, mod->col, "destructors cannot have access modifiers%s", "");
+                    FuncDecl *m = parse_special(&P, c.name, dtor ? "destructor" : "constructor");
+                    for (int q = 0; q < c.nmethods; q++)
+                        if (!strcmp(c.methods[q].name, m->name))
+                            pfail_at(&P, m->line, 1, "class %s already has a %s", c.name,
+                                     dtor ? "destructor" : "constructor");
                     m->is_private = hidden_member;
+                    m->is_protected = protected_member;
                     GROWV(arena, c.methods, c.nmethods, capm, FuncDecl);
                     c.methods[c.nmethods++] = *m;
+                } else if (!c.is_interface && k->kind == T_ID && !tis(k, "function") && ptext(&P, 1, "function") &&
+                           peek(&P, 1)->kind == T_ID) {
+                    pfail(&P, "decorators apply to top-level functions and classes%s", "");
+                } else if (ptext(&P, 0, "function") && !ptext(&P, 1, "(")) {
+                    if (readonly)
+                        pfail_at(&P, mod->line, mod->col, "readonly applies to fields%s", "");
+                    FuncDecl *m = parse_function(&P, is_static ? NULL : c.name, c.is_interface);
+                    m->is_private = hidden_member;
+                    m->is_protected = protected_member;
+                    if (is_static) {
+                        if (!strncmp(m->name, "operator", 8))
+                            pfail_at(&P, m->line, 1, "operators cannot be static%s", "");
+                        for (int q = 0; q < c.nstatic_methods; q++)
+                            if (!strcmp(c.static_methods[q].name, m->name))
+                                pfail_at(&P, m->line, 1, "duplicate static member '%s'", m->name);
+                        GROWV(arena, c.static_methods, c.nstatic_methods, capsm, FuncDecl);
+                        c.static_methods[c.nstatic_methods++] = *m;
+                    } else {
+                        GROWV(arena, c.methods, c.nmethods, capm, FuncDecl);
+                        c.methods[c.nmethods++] = *m;
+                    }
                 } else if (c.is_interface) {
                     pfail(&P, "interfaces declare only function signatures%s", "");
+                } else if (is_static) {
+                    /* `static int count = 0`: stored on the class */
+                    int line = peek(&P, 0)->line, col = peek(&P, 0)->col;
+                    if (ptext(&P, 0, "const"))
+                        take(&P);
+                    if (ptext(&P, 0, "var"))
+                        take(&P);
+                    else if (!ptext(&P, 1, "="))
+                        parse_type(&P);
+                    Token *nm = identifier(&P);
+                    if (!accept(&P, "="))
+                        pfail_at(&P, nm->line, nm->col,
+                                 "static fields need an initial value, such as static int count = 0%s", "");
+                    GROWV(arena, c.static_fields, c.nstatic_fields, capsf, Param);
+                    Param *sp = &c.static_fields[c.nstatic_fields++];
+                    memset(sp, 0, sizeof *sp);
+                    sp->line = line;
+                    sp->name = tstr(&P, nm);
+                    sp->is_private = hidden_member;
+                    sp->is_protected = protected_member;
+                    sp->readonly = readonly;
+                    for (int q = 0; q < c.nstatic_methods; q++)
+                        if (!strcmp(c.static_methods[q].name, sp->name))
+                            pfail_at(&P, nm->line, nm->col, "duplicate static member '%s'", sp->name);
+                    for (int q = 0; q < c.nstatic_fields - 1; q++)
+                        if (!strcmp(c.static_fields[q].name, sp->name))
+                            pfail_at(&P, nm->line, nm->col, "duplicate static member '%s'", sp->name);
+                    Node *a = node(&P, S_ASSIGN, NULL, line, col);
+                    a->op = "=";
+                    a->valueless = true; /* defines the static: no access check */
+                    Node *member = node(&P, N_MEMBER, sp->name, line, col);
+                    nl_push(arena, &member->args, node(&P, N_NAME, c.name, line, col));
+                    a->target = member;
+                    a->expr = expression(&P, 0);
+                    finish(&P);
+                    nl_push(arena, &inits, a);
                 } else {
                     GROWV(arena, c.fields, c.nfields, capf, Param);
                     Param *fp = &c.fields[c.nfields++];
                     memset(fp, 0, sizeof *fp);
                     fp->line = peek(&P, 0)->line;
                     fp->is_private = hidden_member;
+                    fp->is_protected = protected_member;
                     fp->readonly = readonly;
                     fp->type = parse_type(&P);
                     fp->name = tstr(&P, identifier(&P));
@@ -2290,6 +2604,19 @@ static bool parse_program_with(Arena *arena, const char *src, size_t len, Progra
                     finish(&P);
                 }
             }
+            for (int q = 0; q < inits.count; q++)
+                push_statement(&P, &out->body, inits.items[q]);
+            for (int q = ndecos - 1; q >= 0; q--) {
+                /* class decorators are called with the class where it is declared */
+                Node *call = node(&P, N_CALL, "", decos[q]->line, decos[q]->col);
+                nl_push(arena, &call->args, decos[q]);
+                nl_push(arena, &call->args, node(&P, N_NAME, c.name, c.line, 1));
+                call->outer = true;
+                Node *st = node(&P, S_EXPR, NULL, decos[q]->line, decos[q]->col);
+                st->target = call;
+                push_statement(&P, &out->body, st);
+            }
+            ndecos = 0;
             expect(&P, "end");
             finish(&P);
             GROWV(arena, out->classes, out->nclasses, cap_cls, ClassDecl);
@@ -2314,10 +2641,10 @@ static bool parse_program_with(Arena *arena, const char *src, size_t len, Progra
             push_statement(&P, &out->body, s);
         }
         const char *declared = NULL;
-        if (out->nfunctions > nf)
-            declared = out->functions[out->nfunctions - 1].name;
-        else if (out->nclasses > nc)
+        if (out->nclasses > nc)
             declared = out->classes[out->nclasses - 1].name;
+        else if (out->nfunctions > nf)
+            declared = out->functions[out->nfunctions - 1].name;
         else if (out->nenums > ne)
             declared = out->enums[out->nenums - 1].name;
         else if (out->ncomponents > ncomp)

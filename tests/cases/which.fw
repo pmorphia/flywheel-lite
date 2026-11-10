@@ -3,7 +3,7 @@ class Person
     int age
     bool admin = false
     function shout() returns string
-        return inst name.upper()
+        return this.name.upper()
     end
 end
 
