@@ -75,7 +75,8 @@ Commands have the compiler's short aliases: `r` (run), `c` (check), `e` (export)
 `t` (test), and `u` (update); `help`/`h`/`-h`/`--help` print the usage and
 `version`/`v`/`-v`/`--version` the version (`fwl v`).
 
-SOURCE is a `.fw`/`.fly` path, or `-` for standard input. `-s CODE`, `--source CODE`, or
+SOURCE is a `.fw`/`.fly` path, a directory (which runs its `source.fw`), or `-` for standard
+input. `-s CODE`, `--source CODE`, or
 `--source=CODE` in place of SOURCE runs code from the command line (diagnostics name it
 `<source>`); like every option, it can appear anywhere before `--`. `-O0`..`-O3` and `-g` are
 accepted and ignored, so compiler command lines work unchanged. `build`, `desktop`, `serve`,

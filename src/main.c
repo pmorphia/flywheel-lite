@@ -3,6 +3,7 @@
 #include "opcodes.h"
 #include "lite.h"
 #include <errno.h>
+#include <sys/stat.h>
 #include <math.h>
 #include <time.h>
 
@@ -824,6 +825,19 @@ int main(int argc, char **argv) {
         source = read_all(stdin, &len);
         path = "<stdin>";
     } else {
+        /* A directory stands for its entry point: `flywheel-lite app/` runs app/source.fw. */
+        struct stat st;
+        if (stat(path, &st) == 0 && (st.st_mode & S_IFMT) == S_IFDIR) {
+            size_t n = strlen(path);
+            char *entry = xmalloc(n + sizeof "/source.fw");
+            memcpy(entry, path, n);
+            strcpy(entry + n, n && (path[n - 1] == '/' || path[n - 1] == '\\') ? "source.fw" : "/source.fw");
+            if (stat(entry, &st) != 0 || (st.st_mode & S_IFMT) != S_IFREG) {
+                fprintf(stderr, "flywheel-lite: %s is a directory without a source.fw entry point\n", path);
+                return 2;
+            }
+            path = entry;
+        }
         source = read_path(path, &len);
         if (!source) {
             fprintf(stderr, "flywheel-lite: cannot read %s: %s\n", path, strerror(errno));
