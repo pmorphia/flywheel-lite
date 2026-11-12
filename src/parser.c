@@ -643,6 +643,9 @@ static Node *mk_embedded(MarkupCtx *m) {
     m->p = (size_t)end + 1;
     return v;
 }
+/* tags of the elements enclosing the one being read, for closing tags that end several */
+static const char *mk_ancestors[256];
+static int mk_nancestors;
 static Node *mk_element(MarkupCtx *m) {
     Parser *P = m->P;
     const char *s = m->s;
@@ -743,6 +746,7 @@ static Node *mk_element(MarkupCtx *m) {
         }
         if (s[m->p] == '<' && m->p + 1 < n && s[m->p + 1] == '/') {
             MFLUSH();
+            size_t start = m->p;
             m->p += 2;
             const char *close = "";
             if (m->p < n && s[m->p] != '>')
@@ -751,6 +755,18 @@ static Node *mk_element(MarkupCtx *m) {
             if (m->p == n || s[m->p++] != '>')
                 pfail_at(P, mk_line(m), m->col, "expected closing '>'%s", "");
             if (strcmp(close, tag) != 0) {
+                /* The closing tag of an enclosing element ends this one too, as in HTML: a void
+                 * tag or component written without `/>` (`<conf key="a">`). */
+                bool enclosing = false;
+                for (int k = 0; k < mk_nancestors && tag[0] && close[0]; k++)
+                    if (!strcmp(mk_ancestors[k], close))
+                        enclosing = true;
+                if (enclosing) {
+                    m->p = start;
+                    e->implicit_close = true;
+                    free(text.d);
+                    return e;
+                }
                 char msg[256];
                 snprintf(msg, sizeof msg, "mismatched closing tag: expected </%s>, got </%s>", tag, close);
                 pfail_at(P, mk_line(m), m->col, "%s", msg);
@@ -760,7 +776,20 @@ static Node *mk_element(MarkupCtx *m) {
         }
         if (s[m->p] == '<') {
             MFLUSH();
-            nl_push(P->arena, &e->args, mk_element(m));
+            if (mk_nancestors >= 256)
+                pfail_at(P, mk_line(m), m->col, "markup is nested too deeply%s", "");
+            mk_ancestors[mk_nancestors++] = tag;
+            Node *child = mk_element(m);
+            mk_nancestors--;
+            nl_push(P->arena, &e->args, child);
+            if (child->implicit_close) {
+                /* what an unclosed void element read as children are its following siblings */
+                int from = child->nnames;
+                for (int i = from; i < child->args.count; i++)
+                    nl_push(P->arena, &e->args, child->args.items[i]);
+                child->args.count = from;
+                child->implicit_close = false;
+            }
         } else if ((s[m->p] == '{' || s[m->p] == '}') && m->p + 1 < n && s[m->p + 1] == s[m->p]) {
             sb_addc(&text, s[m->p]);
             m->p += 2;
@@ -781,6 +810,7 @@ static Node *mk_element(MarkupCtx *m) {
 static Node *parse_markup(Parser *P) {
     Token *t = take(P);
     MarkupCtx m = {P, t->text, (size_t)t->len, 0, t->line, t->col};
+    mk_nancestors = 0;
     Node *e = mk_element(&m);
     if (m.p != m.n)
         pfail_at(P, t->line, t->col, "unexpected text after markup%s", "");

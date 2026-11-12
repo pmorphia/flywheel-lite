@@ -49,7 +49,7 @@ Elsewhere, point at the Flywheel checkout with `make FLYWHEEL_DIR=/path/to/flywh
 through to `make test`), `cmake -DFLYWHEEL_DIR=/path/to/flywheel`, or the `FLYWHEEL_DIR`
 environment variable for `tests/run_tests.py`.
 
-The library modules written in Flywheel (`csv`, `url`, `log`, `args`, `bigint`, `decimal`, `random`, `metric`, `imperial`, and `_time`, the time units behind `import time`) are
+The library modules written in Flywheel (`csv`, `url`, `log`, `args`, `bigint`, `decimal`, `random`, `metric`, `imperial`, `cogwheel`, and `_time`, the time units behind `import time`) are
 embedded into the executable from `$FLYWHEEL_DIR/stdlib/fw` at build time by a small helper (`tools/embed.c`),
 so the installed binary is self-contained. `make debug` builds with AddressSanitizer and UBSan.
 
@@ -103,8 +103,9 @@ literals such as `100m`, quantity types of any numeric type such as `u8[time]` a
 `float[metric.length]`, `x in cm`, `type`/`unit`/`unitns`, units shared across modules, `unitconv A = B`
 between namespaces (`1m + 1ft`), and the `metric`, `imperial`, and `time` unit libraries),
 arrays/tuples/maps/sets with their methods, `freeze`, casts and conversions, markup literals,
-components (including `void component`s, used like `<br>` with no closing tag),
-element families, and local, path, package (`.flywheel-modules`) and library-module
+components (also qualified by module, `<cogwheel.heading>`; including `void component`s, used like
+`<br>` with no closing tag), element families, void tags and components written without a closing
+tag (`<cogwheel.conf key="a" value="1">`), and local, path, package (`.flywheel-modules`) and library-module
 imports with aliases, wildcards and `private`.
 
 Native modules: `math`, `fs`, `os` (including `run`, `process`, `pipeline` with captured output

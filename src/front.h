@@ -113,7 +113,7 @@ struct Node {
     NodeList args;      /* expression operands / element attributes then children */
     const char **names; /* chain operators, element attribute names */
     int nnames;
-    bool grouped, outer, valueless;
+    bool grouped, outer, valueless, implicit_close;
     FuncDecl *fn; /* lambda */
     /* statements */
     const char *name, *type, *op;

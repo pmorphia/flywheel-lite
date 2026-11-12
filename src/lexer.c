@@ -198,7 +198,11 @@ static bool markup_argument_start(const char *s, size_t n, size_t p) {
 #undef SPACE
 }
 
+/* Open tags are kept as (start, length) pairs: a closing tag closes the innermost open element
+ * of its name and the elements opened inside it that were never closed (`<conf key="a">`
+ * inside `<heading>...</heading>`); the parser hoists their children. */
 static long markup_end(const char *s, size_t n, size_t p) {
+    size_t open_at[256], open_len[256];
     int depth = 0;
     for (; p < n; ++p) {
         if (s[p] == '{' && p + 1 < n && s[p + 1] == '{') {
@@ -238,14 +242,23 @@ static long markup_end(const char *s, size_t n, size_t p) {
         }
         if (q >= n)
             break;
-        size_t name_end = p + 1;
+        size_t name_start = closing ? p + 2 : p + 1, name_end = name_start;
         while (name_end < q && (lx_part((unsigned char)s[name_end]) || s[name_end] == '-' ||
                                 s[name_end] == ':' || s[name_end] == '.'))
             ++name_end;
-        if (closing)
-            --depth;
-        else if ((q == 0 || s[q - 1] != '/') && !lx_void_tag(s + p + 1, name_end - p - 1))
+        size_t len = name_end - name_start;
+        if (closing) {
+            int k = depth - 1;
+            while (len && k >= 0 && !(open_len[k] == len && memcmp(s + open_at[k], s + name_start, len) == 0))
+                --k;
+            depth = len && k >= 0 ? k : (depth > 0 ? depth - 1 : -1);
+        } else if ((q == 0 || s[q - 1] != '/') && !lx_void_tag(s + p + 1, name_end - p - 1)) {
+            if (depth >= 256)
+                return -1;
+            open_at[depth] = name_start;
+            open_len[depth] = len;
             ++depth;
+        }
         if (depth == 0)
             return (long)q;
         p = q;

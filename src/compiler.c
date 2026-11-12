@@ -768,6 +768,26 @@ static bool find_component(Compiler *C, const char *tag, Resolved *out, bool *is
             *is_void = C->prog->components[i].is_void;
             return true;
         }
+    /* a qualified component of an imported module: <cogwheel.heading> */
+    const char *dot = strrchr(tag, '.');
+    if (dot && dot > tag) {
+        char alias[128];
+        size_t len = (size_t)(dot - tag);
+        if (len < sizeof alias) {
+            memcpy(alias, tag, len);
+            alias[len] = 0;
+            ObjModule *m = find_alias(C, alias);
+            if (m && !m->native && m->is_component_slot) {
+                int slot = module_find(m, str_intern_c(C->vm, dot + 1));
+                if (slot >= 0 && m->is_component_slot[slot]) {
+                    out->kind = R_MGLOBAL;
+                    out->module = m;
+                    out->index = slot;
+                    return true;
+                }
+            }
+        }
+    }
     for (int i = C->nwilds - 1; i >= 0; i--)
         if (C->wilds[i].component && !strcmp(C->wilds[i].name, tag)) {
             out->kind = R_MGLOBAL;
