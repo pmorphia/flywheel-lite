@@ -10,3 +10,4 @@ positive/weak_references           # weak references clear at collection, not wh
 positive/cycle_collection          # live_objects() collects first, so unreachable cycles are never counted
 trap/narrowed_global_changed       # flow-typing traps on narrowed globals need static types
 positive/destructors           # destructors run at collection or exit, not when the last reference drops
+positive/os_background_processes  # os.start, os.alive, os.wait, os.kill, and os.pid are not implemented

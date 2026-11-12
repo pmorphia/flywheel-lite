@@ -105,7 +105,8 @@ between namespaces (`1m + 1ft`), and the `metric`, `imperial`, and `time` unit l
 arrays/tuples/maps/sets with their methods, `freeze`, casts and conversions, markup literals,
 components (also qualified by module, `<cogwheel.heading>`; including `void component`s, used like
 `<br>` with no closing tag), element families, void tags and components written without a closing
-tag (`<cogwheel.conf key="a" value="1">`), and local, path, package (`.flywheel-modules`) and library-module
+tag (`<cogwheel.conf key="a" value="1">`), and local, path, package (every `.flywheel-modules` at
+or above the importing file, nearest first) and library-module
 imports with aliases, wildcards and `private`.
 
 Native modules: `math`, `fs`, `os` (including `run`, `process`, `pipeline` with captured output

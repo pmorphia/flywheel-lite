@@ -810,8 +810,12 @@ static Node *mk_element(MarkupCtx *m) {
 static Node *parse_markup(Parser *P) {
     Token *t = take(P);
     MarkupCtx m = {P, t->text, (size_t)t->len, 0, t->line, t->col};
+    /* Markup inside `{...}` in markup re-enters here: its elements have no ancestors of their
+     * own, and the enclosing element's ancestors come back afterwards. */
+    int saved = mk_nancestors;
     mk_nancestors = 0;
     Node *e = mk_element(&m);
+    mk_nancestors = saved;
     if (m.p != m.n)
         pfail_at(P, t->line, t->col, "unexpected text after markup%s", "");
     return e;

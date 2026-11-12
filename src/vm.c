@@ -3617,6 +3617,39 @@ static char *resolve_module_path(VM *vm, const char *name, const char *from) {
     return result;
 }
 
+/* Where resolve_module_path looked for a missing module, for the error message. */
+static void describe_search(const char *from, char *out, size_t size) {
+    size_t used = (size_t)snprintf(out, size, "local .fw and .fly files");
+    const char *sep = ", packages in ";
+    char *from_dir = dir_of(from ? from : ".");
+    char *d = canonical(from_dir);
+    free(from_dir);
+    for (;;) {
+        char *mods = join_path(d, ".flywheel-modules");
+        if (dir_exists(mods) && used < size) {
+            used += (size_t)snprintf(out + used, size - used, "%s%s", sep, mods);
+            sep = ", ";
+        }
+        free(mods);
+        char *up = dir_of(d);
+        bool top = !strcmp(up, d) || !strcmp(up, ".") || !up[0];
+        free(d);
+        d = up;
+        if (top)
+            break;
+    }
+    free(d);
+    const char *home = getenv("FLYWHEEL_HOME");
+    if (home) {
+        char *mods = join_path(home, "modules");
+        if (dir_exists(mods) && used < size)
+            used += (size_t)snprintf(out + used, size - used, "%s%s", sep, mods);
+        free(mods);
+    }
+    if (used < size)
+        snprintf(out + used, size - used, ", library and native modules");
+}
+
 static ObjModule *compile_file_module(VM *vm, ObjString *name, const char *path, const char *source,
                                       size_t len, CompileError *err) {
     ObjModule *m = new_module(vm, name);
@@ -3700,7 +3733,11 @@ ObjModule *vm_load_module(VM *vm, const char *name, const char *from_path, bool 
     else if (lib_is_native_module(name))
         snprintf(err->message, sizeof err->message, "module '%s' is not available in Flywheel Lite; use the Flywheel compiler for it", name);
     else
-        snprintf(err->message, sizeof err->message, "cannot find module '%s'", name);
+    {
+        char where[900];
+        describe_search(from_path, where, sizeof where);
+        snprintf(err->message, sizeof err->message, "module '%.100s' not found (searched %.880s)", name, where);
+    }
     return NULL;
 }
 
