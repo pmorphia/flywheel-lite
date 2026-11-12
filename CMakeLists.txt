@@ -4,7 +4,7 @@
 #   cmake --build build --config Release
 #   ctest --test-dir build -C Release --output-on-failure
 cmake_minimum_required(VERSION 3.16)
-project(flywheel-lite VERSION 2.7 LANGUAGES C)
+project(flywheel-lite VERSION 2.8 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
