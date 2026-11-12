@@ -85,6 +85,56 @@ bool lx_html_void(const char *tag, size_t n) {
             return true;
     return false;
 }
+static VoidComponents void_components;
+VoidComponents lx_set_void_components(VoidComponents set) {
+    VoidComponents saved = void_components;
+    void_components = set;
+    return saved;
+}
+bool lx_void_tag(const char *tag, size_t n) {
+    if (lx_html_void(tag, n))
+        return true;
+    for (int i = 0; i < void_components.count; i++)
+        if (strlen(void_components.names[i]) == n && memcmp(void_components.names[i], tag, n) == 0)
+            return true;
+    return false;
+}
+static bool ident_char(char c) { return isalnum((unsigned char)c) || c == '_'; }
+VoidComponents lx_scan_void_components(Arena *arena, const char *s, size_t n) {
+    VoidComponents out = {NULL, 0};
+    int cap = 0;
+    for (size_t p = 0; p + 4 <= n; p++) {
+        if (memcmp(s + p, "void", 4) != 0 || (p > 0 && ident_char(s[p - 1])))
+            continue;
+        size_t q = p + 4, gap = q;
+        while (q < n && (s[q] == ' ' || s[q] == '\t'))
+            q++;
+        if (q == gap || q + 9 > n || memcmp(s + q, "component", 9) != 0)
+            continue;
+        q += 9;
+        gap = q;
+        while (q < n && (s[q] == ' ' || s[q] == '\t'))
+            q++;
+        size_t begin = q;
+        while (q < n && ident_char(s[q]))
+            q++;
+        if (begin == gap || q == begin)
+            continue;
+        if (out.count == cap) {
+            int ncap = cap ? cap * 2 : 4;
+            const char **names = arena_alloc(arena, sizeof(char *) * (size_t)ncap);
+            if (out.count)
+                memcpy(names, out.names, sizeof(char *) * (size_t)out.count);
+            out.names = names;
+            cap = ncap;
+        }
+        char *name = arena_alloc(arena, q - begin + 1);
+        memcpy(name, s + begin, q - begin);
+        name[q - begin] = '\0';
+        out.names[out.count++] = name;
+    }
+    return out;
+}
 long lx_comment_end(const char *s, size_t n, size_t p) {
     for (size_t q = p + 4; q + 2 < n; q++)
         if (s[q] == '-' && s[q + 1] == '-' && s[q + 2] == '>')
@@ -194,7 +244,7 @@ static long markup_end(const char *s, size_t n, size_t p) {
             ++name_end;
         if (closing)
             --depth;
-        else if ((q == 0 || s[q - 1] != '/') && !lx_html_void(s + p + 1, name_end - p - 1))
+        else if ((q == 0 || s[q - 1] != '/') && !lx_void_tag(s + p + 1, name_end - p - 1))
             ++depth;
         if (depth == 0)
             return (long)q;
@@ -380,7 +430,8 @@ static bool lex_text(Arena *arena, const char *src, size_t len, TokenList *out, 
             if (end == -2)
                 lfail(&L, "unterminated markup comment: expected '-->'");
             if (end < 0)
-                lfail(&L, "unterminated markup literal");
+                lfail(&L, "unterminated markup literal (a void component declared in another module "
+                          "needs '/>')");
             emit(&L, T_MARKUP, s + L.p, (size_t)end - L.p + 1, (size_t)end + 1);
             L.expected = false;
             continue;

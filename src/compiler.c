@@ -54,7 +54,7 @@ typedef struct {
     ObjModule *from;
     int slot;
     Value value;
-    bool component;
+    bool component, void_component;
 } Wild;
 
 typedef struct {
@@ -760,11 +760,12 @@ static void compile_call(Compiler *C, Node *e) {
     emit2(C, OP_CALL, (uint8_t)argc);
 }
 
-static bool find_component(Compiler *C, const char *tag, Resolved *out) {
+static bool find_component(Compiler *C, const char *tag, Resolved *out, bool *is_void) {
     for (int i = 0; i < C->prog->ncomponents; i++)
         if (!strcmp(C->prog->components[i].name, tag)) {
             out->kind = R_GLOBAL;
             out->index = module_find(C->module, str_intern_c(C->vm, tag));
+            *is_void = C->prog->components[i].is_void;
             return true;
         }
     for (int i = C->nwilds - 1; i >= 0; i--)
@@ -772,6 +773,7 @@ static bool find_component(Compiler *C, const char *tag, Resolved *out) {
             out->kind = R_MGLOBAL;
             out->module = C->wilds[i].module;
             out->index = C->wilds[i].slot;
+            *is_void = C->wilds[i].void_component;
             return true;
         }
     return false;
@@ -792,7 +794,10 @@ static void compile_element(Compiler *C, Node *e) {
     const char *tag = e->text;
     int nchildren = e->args.count - e->nnames;
     Resolved comp;
-    if (tag[0] && find_component(C, tag, &comp)) {
+    bool is_void = false;
+    if (tag[0] && find_component(C, tag, &comp, &is_void)) {
+        if (is_void && nchildren > 0)
+            cfail(C, e->line, "void component <%s> cannot have children", tag);
         emit_get_resolved(C, &comp);
         for (int i = 0; i < e->nnames; i++) {
             emit_const(C, val_obj(str_intern_c(C->vm, e->names[i])));
@@ -2286,6 +2291,7 @@ static void process_imports(Compiler *C) {
                     w.module = m;
                     w.slot = s;
                     w.component = m->is_component_slot && m->is_component_slot[s];
+                    w.void_component = m->is_component_slot && m->is_component_slot[s] == 2;
                 }
                 add_wild(C, w);
             }
@@ -2492,7 +2498,8 @@ ObjFunction *compile_module(VM *vm, ObjModule *module, const char *source, size_
         if (module->repl && module_find(module, str_intern_c(vm, prog.components[i].name)) >= 0)
             continue;
         declare_global(C, prog.components[i].name, prog.components[i].line);
-        module->is_component_slot[module_find(module, str_intern_c(vm, prog.components[i].name))] = true;
+        module->is_component_slot[module_find(module, str_intern_c(vm, prog.components[i].name))] =
+            prog.components[i].is_void ? 2 : 1;
     }
     for (int i = 0; i < prog.body.count; i++) {
         Node *s = prog.body.items[i];

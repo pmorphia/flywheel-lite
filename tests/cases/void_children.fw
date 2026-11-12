@@ -1,0 +1,3 @@
+import html.*
+import lib.icons.*
+print <p><Icon name="x">text</Icon></p>

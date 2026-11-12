@@ -1,0 +1,2 @@
+import html.*
+public void component Icon = <i class="icon-{attr name}" />

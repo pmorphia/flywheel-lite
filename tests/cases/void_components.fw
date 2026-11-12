@@ -1,0 +1,10 @@
+# `void component` declares a component used like an HTML void element: no `/>`, no children.
+import html.*
+import lib.icons.*
+void component Badge = <span class="badge">{attr label}</span>
+component Card = <div><Badge label="new">{attr inner}</div>
+print <Badge label="one">
+print <p><Badge label="a"> and <Badge label="b" /></p>
+print <Card><b>body</b></Card>
+print <ul>{<li><Badge label="nested"></li>}</ul>
+print <p><Icon name="star" /></p>

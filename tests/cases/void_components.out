@@ -1,0 +1,5 @@
+<span class="badge">one</span>
+<p><span class="badge">a</span> and <span class="badge">b</span></p>
+<div><span class="badge">new</span><b>body</b></div>
+<ul><li><span class="badge">nested</span></li></ul>
+<p><i class="icon-star"></i></p>

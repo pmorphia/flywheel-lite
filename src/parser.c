@@ -717,7 +717,7 @@ static Node *mk_element(MarkupCtx *m) {
     }
     if (m->p == n || s[m->p++] != '>')
         pfail_at(P, mk_line(m), m->col, "expected '>'%s", "");
-    if (lx_html_void(tag, strlen(tag)))
+    if (lx_void_tag(tag, strlen(tag)))
         return e;
     SBuf text = {0};
 #define MFLUSH()                                                                                  \
@@ -1062,6 +1062,17 @@ static Node *operators(Parser *P, Node *e, int level) {
     return e;
 }
 
+/* Whether markup reads `attr NAME` (a void component cannot read `attr inner`). */
+static bool uses_attr(const Node *e, const char *name) {
+    if (!e)
+        return false;
+    if (e->kind == N_ATTR && e->text && !strcmp(e->text, name))
+        return true;
+    for (int i = 0; i < e->args.count; i++)
+        if (uses_attr(e->args.items[i], name))
+            return true;
+    return false;
+}
 static Node *parse_sub_expression(Parser *P, const char *text, size_t n, int line, int col,
                                   const char *what) {
     TokenList toks;
@@ -2003,7 +2014,16 @@ bool lower_program_units(Arena *arena, Program *prog, const UnitNs *imported, in
     lower_units(&P, prog, imported, nimported, true);
     return true;
 }
+static bool parse_program_body(Arena *arena, const char *src, size_t len, Program *out, CompileError *err,
+                               bool defer_units);
 static bool parse_program_with(Arena *arena, const char *src, size_t len, Program *out, CompileError *err,
+                               bool defer_units) {
+    VoidComponents saved = lx_set_void_components(lx_scan_void_components(arena, src, len));
+    bool ok = parse_program_body(arena, src, len, out, err, defer_units);
+    lx_set_void_components(saved);
+    return ok;
+}
+static bool parse_program_body(Arena *arena, const char *src, size_t len, Program *out, CompileError *err,
                                bool defer_units) {
     memset(out, 0, sizeof *out);
     TokenList toks;
@@ -2621,7 +2641,15 @@ static bool parse_program_with(Arena *arena, const char *src, size_t len, Progra
             finish(&P);
             GROWV(arena, out->classes, out->nclasses, cap_cls, ClassDecl);
             out->classes[out->nclasses++] = c;
-        } else if (accept(&P, "component")) {
+        } else if (ptext(&P, 0, "component") ||
+                   (ptext(&P, 0, "void") && peek(&P, 1)->kind == T_ID &&
+                    tis(peek(&P, 1), "component"))) {
+            /* `void component Name = ...` (`void` is a soft keyword here): a component used like
+               an HTML void element, `<Name attr={x}>`, with no children. */
+            bool is_void = ptext(&P, 0, "void");
+            if (is_void)
+                take(&P);
+            take(&P);
             Token *n = identifier(&P);
             expect(&P, "=");
             const char *nm = tstr(&P, n);
@@ -2633,6 +2661,10 @@ static bool parse_program_with(Arena *arena, const char *src, size_t len, Progra
             cd->name = nm;
             cd->line = n->line;
             cd->markup = expression(&P, 0);
+            cd->is_void = is_void;
+            if (is_void && uses_attr(cd->markup, "inner"))
+                pfail_at(&P, n->line, n->col, "void component %s has no children; 'attr inner' is not available",
+                         nm);
             finish(&P);
         } else {
             Node *s = statement(&P);

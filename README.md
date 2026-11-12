@@ -103,7 +103,8 @@ literals such as `100m`, quantity types of any numeric type such as `u8[time]` a
 `float[metric.length]`, `x in cm`, `type`/`unit`/`unitns`, units shared across modules, `unitconv A = B`
 between namespaces (`1m + 1ft`), and the `metric`, `imperial`, and `time` unit libraries),
 arrays/tuples/maps/sets with their methods, `freeze`, casts and conversions, markup literals,
-components, element families, and local, path, package (`.flywheel-modules`) and library-module
+components (including `void component`s, used like `<br>` with no closing tag),
+element families, and local, path, package (`.flywheel-modules`) and library-module
 imports with aliases, wildcards and `private`.
 
 Native modules: `math`, `fs`, `os` (including `run`, `process`, `pipeline` with captured output

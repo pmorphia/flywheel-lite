@@ -304,7 +304,7 @@ typedef struct ObjModule {
     ValueArray values;
     ValueArray names_by_slot;
     bool *is_private;
-    bool *is_component_slot;
+    unsigned char *is_component_slot; /* 1: a component, 2: a void component */
     int private_cap;
     bool native, initialized, initializing, html, repl;
     Value init;       /* closure running the module body */

@@ -16,6 +16,18 @@ bool lx_literal_close(const char *s, size_t n, size_t p);
 long lx_brace_end(const char *s, size_t n, size_t p);
 long lx_quoted_end(const char *s, size_t n, size_t p, char quote);
 bool lx_html_void(const char *tag, size_t n);
+/* HTML void elements and the void components (`void component Icon = ...`) of the source being
+ * parsed: `<Icon>` needs no `/>` or closing tag. */
+bool lx_void_tag(const char *tag, size_t n);
+typedef struct {
+    const char **names;
+    int count;
+} VoidComponents;
+/* The names a source declares with `void component NAME`; markup is delimited while lexing,
+ * before declarations are parsed, so the lexer learns them from a scan of the text. */
+VoidComponents lx_scan_void_components(Arena *arena, const char *src, size_t len);
+/* Sets the void components the lexer and markup parser use; returns the previous set. */
+VoidComponents lx_set_void_components(VoidComponents set);
 long lx_comment_end(const char *s, size_t n, size_t p);
 
 typedef struct Node Node;
@@ -160,6 +172,7 @@ typedef struct {
     const char *name;
     Node *markup;
     int line;
+    bool is_void; /* `void component`: used like a void element, with no children */
 } ComponentDecl;
 
 /* `unitns time` with its `unit time.s = 1` declarations (see lower.c). Units apply to every
