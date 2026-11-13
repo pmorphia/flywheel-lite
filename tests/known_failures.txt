@@ -11,3 +11,6 @@ positive/cycle_collection          # live_objects() collects first, so unreachab
 trap/narrowed_global_changed       # flow-typing traps on narrowed globals need static types
 positive/destructors           # destructors run at collection or exit, not when the last reference drops
 positive/os_background_processes  # os.start, os.alive, os.wait, os.kill, and os.pid are not implemented
+positive/struct_values             # `struct` value types (Flywheel 2.20) are not implemented
+positive/struct_storage            # `struct` value types (Flywheel 2.20) are not implemented
+positive/gc_controls               # gc.step, gc.pause, gc.resume, gc.paused, and gc.threshold are not implemented
