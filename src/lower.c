@@ -621,27 +621,247 @@ typedef struct {
     int kind, depth;
 } Binding;
 typedef struct {
+    const char **items;
+    int count, cap;
+} Names;
+static bool names_has(const Names *n, const char *name) {
+    for (int i = 0; name && i < n->count; i++)
+        if (!strcmp(n->items[i], name))
+            return true;
+    return false;
+}
+static void names_add(Names *n, const char *name) {
+    if (!name || names_has(n, name))
+        return;
+    if (n->count == n->cap) {
+        n->cap = GROW_CAP(n->cap);
+        n->items = realloc(n->items, sizeof(const char *) * (size_t)n->cap);
+    }
+    n->items[n->count++] = name;
+}
+/* What an expression or a function body reads: plain names, fields (member accesses and
+ * `this.field` reads that are not called), and the functions and methods it calls. */
+typedef struct {
+    Names names, fields;
+    FuncDecl **calls;
+    int ncalls, capcalls;
+} Reads;
+static void reads_call(Reads *r, FuncDecl *f) {
+    for (int i = 0; i < r->ncalls; i++)
+        if (r->calls[i] == f)
+            return;
+    if (r->ncalls == r->capcalls) {
+        r->capcalls = GROW_CAP(r->capcalls);
+        r->calls = realloc(r->calls, sizeof(FuncDecl *) * (size_t)r->capcalls);
+    }
+    r->calls[r->ncalls++] = f;
+}
+static void reads_free(Reads *r) {
+    free(r->names.items);
+    free(r->fields.items);
+    free(r->calls);
+}
+typedef struct {
     Parser *P;
+    Program *prog;
     Binding *items;
     int count, cap, depth, counter;
     /* Names that a `when` condition or `computed` expression reads: a plain variable with one of
      * these names is made reactive, so `when delay == 10s do` works on `int[time] delay`. */
-    const char **watched;
-    int nwatched, capwatched;
+    Names watched;
+    /* Top-level variables read by the functions a condition calls: made reactive at the top level. */
+    Names watched_top;
+    /* Fields that conditions read, directly or through the functions they call. */
+    Names fields;
+    /* What each function's own body reads, computed once */
+    FuncDecl **direct_fn;
+    Reads *direct;
+    int ndirect, capdirect;
+    int top_count; /* bindings of the top-level scope: items[0 .. top_count) */
 } Lowerer;
+
+static void scan(Lowerer *L, Node *e, Reads *r, const Names *locals);
+static void scan_list(Lowerer *L, NodeList *l, Reads *r, const Names *locals);
+static void calls_named(Lowerer *L, const char *name, bool method, Reads *r) {
+    Program *p = L->prog;
+    if (!method) {
+        for (int i = 0; i < p->nfunctions; i++)
+            if (p->functions[i].name && !strcmp(p->functions[i].name, name))
+                reads_call(r, &p->functions[i]);
+        return;
+    }
+    for (int c = 0; c < p->nclasses; c++) {
+        for (int m = 0; m < p->classes[c].nmethods; m++)
+            if (p->classes[c].methods[m].name && !strcmp(p->classes[c].methods[m].name, name))
+                reads_call(r, &p->classes[c].methods[m]);
+        for (int m = 0; m < p->classes[c].nstatic_methods; m++)
+            if (p->classes[c].static_methods[m].name && !strcmp(p->classes[c].static_methods[m].name, name))
+                reads_call(r, &p->classes[c].static_methods[m]);
+    }
+}
+static bool is_function(Lowerer *L, const char *name) {
+    for (int i = 0; i < L->prog->nfunctions; i++)
+        if (L->prog->functions[i].name && !strcmp(L->prog->functions[i].name, name))
+            return true;
+    return false;
+}
+static void scan(Lowerer *L, Node *e, Reads *r, const Names *locals) {
+    if (!e)
+        return;
+    if (e->kind == N_NAME) {
+        if (!(locals && names_has(locals, e->text)))
+            names_add(&r->names, e->text);
+        return;
+    }
+    if (e->kind == N_INST) { /* this.field */
+        names_add(&r->fields, e->text);
+        return;
+    }
+    if (e->kind == N_MEMBER && e->args.count > 0 && e->args.items[0]) {
+        names_add(&r->fields, e->text);
+        scan(L, e->args.items[0], r, locals);
+        return;
+    }
+    int from = 0;
+    if (e->kind == N_CALL && e->args.count > 0 && e->args.items[0]) {
+        Node *callee = e->args.items[0];
+        if (callee->kind == N_NAME && !(locals && names_has(locals, callee->text))) {
+            if (is_function(L, callee->text))
+                calls_named(L, callee->text, false, r);
+            else
+                names_add(&r->names, callee->text); /* a function-valued variable */
+        } else if (callee->kind == N_MEMBER && callee->args.count > 0 && callee->args.items[0]) {
+            calls_named(L, callee->text, true, r);
+            scan(L, callee->args.items[0], r, locals);
+        } else if (callee->kind == N_INST) {
+            calls_named(L, callee->text, true, r);
+        } else
+            scan(L, callee, r, locals);
+        from = 1;
+    }
+    for (int i = from; i < e->args.count; i++)
+        scan(L, e->args.items[i], r, locals);
+    if (e->fn)
+        scan_list(L, &e->fn->body, r, locals);
+}
+static void scan_list(Lowerer *L, NodeList *l, Reads *r, const Names *locals) {
+    for (int i = 0; i < l->count; i++) {
+        Node *s = l->items[i];
+        scan(L, s->expr, r, locals);
+        if (s->target) {
+            /* an assignment writes its target: only the object and index parts are read */
+            if (s->kind == S_ASSIGN && s->target->kind != N_NAME) {
+                for (int k = 0; k < s->target->args.count; k++)
+                    scan(L, s->target->args.items[k], r, locals);
+            } else if (s->kind != S_ASSIGN)
+                scan(L, s->target, r, locals);
+        }
+        for (int c = 0; s->guards && c < s->ncatches; c++)
+            scan(L, s->guards[c], r, locals);
+        scan_list(L, &s->body, r, locals);
+        scan_list(L, &s->other, r, locals);
+        scan_list(L, &s->finalizer, r, locals);
+        for (int c = 0; c < s->ncatches; c++)
+            scan_list(L, &s->catches[c], r, locals);
+    }
+}
+static void declared_list(NodeList *l, Names *out);
+static void declared_expr(Node *e, Names *out) {
+    if (!e)
+        return;
+    for (int i = 0; i < e->args.count; i++)
+        declared_expr(e->args.items[i], out);
+    if (e->fn) {
+        for (int i = 0; i < e->fn->nparams; i++)
+            names_add(out, e->fn->params[i].name);
+        declared_list(&e->fn->body, out);
+    }
+}
+static void pattern_names(Node *p, Names *out) {
+    if (!p)
+        return;
+    if (p->kind == N_NAME)
+        names_add(out, p->text);
+    for (int i = 0; i < p->args.count; i++)
+        pattern_names(p->args.items[i], out);
+}
+static void declared_list(NodeList *l, Names *out) {
+    for (int i = 0; i < l->count; i++) {
+        Node *s = l->items[i];
+        if (s->kind == S_DECLARE || s->kind == S_FOR || s->kind == S_DESTRUCTURE)
+            names_add(out, s->name);
+        if (s->kind == S_FOR)
+            names_add(out, s->op);
+        names_add(out, s->alias);
+        for (int c = 0; s->catch_names && c < s->ncatches; c++)
+            names_add(out, s->catch_names[c]);
+        for (int c = 0; s->patterns && c < s->ncatches; c++)
+            for (int k = 0; k < s->patterns[c].count; k++)
+                pattern_names(s->patterns[c].items[k], out);
+        declared_expr(s->expr, out);
+        declared_expr(s->target, out);
+        declared_list(&s->body, out);
+        declared_list(&s->other, out);
+        declared_list(&s->finalizer, out);
+        for (int c = 0; c < s->ncatches; c++)
+            declared_list(&s->catches[c], out);
+    }
+}
+static Reads *own(Lowerer *L, FuncDecl *f) {
+    for (int i = 0; i < L->ndirect; i++)
+        if (L->direct_fn[i] == f)
+            return &L->direct[i];
+    Names locals = {0};
+    for (int i = 0; i < f->nparams; i++)
+        names_add(&locals, f->params[i].name);
+    declared_list(&f->body, &locals);
+    Reads r = {0};
+    scan_list(L, &f->body, &r, &locals);
+    free(locals.items);
+    if (L->ndirect == L->capdirect) {
+        L->capdirect = GROW_CAP(L->capdirect);
+        L->direct_fn = realloc(L->direct_fn, sizeof(FuncDecl *) * (size_t)L->capdirect);
+        L->direct = realloc(L->direct, sizeof(Reads) * (size_t)L->capdirect);
+    }
+    L->direct_fn[L->ndirect] = f;
+    L->direct[L->ndirect] = r;
+    return &L->direct[L->ndirect++];
+}
+/* Everything the called functions read, following their calls in turn. */
+static Reads called(Lowerer *L, Reads *start) {
+    Reads out = {0};
+    Reads work = {0}; /* calls: the functions seen, in order; walked as a queue */
+    for (int i = 0; i < start->ncalls; i++)
+        reads_call(&work, start->calls[i]);
+    for (int i = 0; i < work.ncalls; i++) {
+        Reads *r = own(L, work.calls[i]);
+        for (int k = 0; k < r->names.count; k++)
+            names_add(&out.names, r->names.items[k]);
+        for (int k = 0; k < r->fields.count; k++)
+            names_add(&out.fields, r->fields.items[k]);
+        for (int k = 0; k < r->ncalls; k++)
+            reads_call(&work, r->calls[k]);
+    }
+    reads_free(&work);
+    return out;
+}
 
 static void watch_reads(Lowerer *L, Node *e) {
     if (!e)
         return;
-    if (e->kind == N_NAME && e->text) {
-        if (L->nwatched == L->capwatched) {
-            L->capwatched = GROW_CAP(L->capwatched);
-            L->watched = realloc(L->watched, sizeof(const char *) * (size_t)L->capwatched);
-        }
-        L->watched[L->nwatched++] = e->text;
-    }
-    for (int i = 0; i < e->args.count; i++)
-        watch_reads(L, e->args.items[i]);
+    Reads r = {0};
+    scan(L, e, &r, NULL);
+    for (int i = 0; i < r.names.count; i++)
+        names_add(&L->watched, r.names.items[i]);
+    for (int i = 0; i < r.fields.count; i++)
+        names_add(&L->fields, r.fields.items[i]);
+    Reads deep = called(L, &r);
+    for (int i = 0; i < deep.names.count; i++)
+        names_add(&L->watched_top, deep.names.items[i]);
+    for (int i = 0; i < deep.fields.count; i++)
+        names_add(&L->fields, deep.fields.items[i]);
+    reads_free(&deep);
+    reads_free(&r);
 }
 static void watch_list(Lowerer *L, NodeList *l);
 static void watch_lambdas(Lowerer *L, Node *e) {
@@ -666,15 +886,14 @@ static void watch_list(Lowerer *L, NodeList *l) {
             watch_list(L, &s->catches[c]);
     }
 }
-static bool watched(Lowerer *L, const char *name) {
-    for (int i = 0; name && i < L->nwatched; i++)
-        if (!strcmp(L->watched[i], name))
-            return true;
-    return false;
-}
-/* A plain declaration that a `when` or `computed` reads becomes reactive. */
-static bool promoted(Lowerer *L, Node *s) {
-    return !(s->op && !strcmp(s->op, "const")) && (watched(L, s->name) || watched(L, s->alias));
+/* A plain declaration that a `when` or `computed` reads becomes reactive; so does a top-level one
+ * that a function called by a condition reads. */
+static bool promoted(Lowerer *L, Node *s, bool top) {
+    if (s->op && !strcmp(s->op, "const"))
+        return false;
+    if (names_has(&L->watched, s->name) || names_has(&L->watched, s->alias))
+        return true;
+    return top && (names_has(&L->watched_top, s->name) || names_has(&L->watched_top, s->alias));
 }
 
 static void bind(Lowerer *L, const char *name, int kind, const char *target) {
@@ -688,6 +907,12 @@ static void bind(Lowerer *L, const char *name, int kind, const char *target) {
 }
 static Binding *find(Lowerer *L, const char *name) {
     for (int i = L->count - 1; i >= 0; i--)
+        if (!strcmp(L->items[i].name, name))
+            return &L->items[i];
+    return NULL;
+}
+static Binding *find_top(Lowerer *L, const char *name) {
+    for (int i = L->top_count - 1; i >= 0; i--)
         if (!strcmp(L->items[i].name, name))
             return &L->items[i];
     return NULL;
@@ -709,48 +934,71 @@ static char *fmt(Lowerer *L, const char *f, ...) {
 static NodeList gen(Lowerer *L, const char *text, Node *at) {
     return generated_body(L->P, text, at->line, at->col);
 }
-/* Runs every watcher of `name`; a copy, so watchers may unregister while it runs. */
-static Node *notify(Lowerer *L, const char *name, Node *at) {
-    char *text = fmt(L, "for __fwr_f in __fwr_w_%s.copy() do\n    __fwr_f()\nend\n", name);
+/* Runs every watcher in a list; a copy, so watchers may unregister while it runs. */
+static Node *notify(Lowerer *L, const char *list, Node *at) {
+    char *text = fmt(L, "if %s.length > 0 do\n    for __fwr_f in %s.copy() do\n        __fwr_f()\n    end\nend\n",
+                     list, list);
     return gen(L, text, at).items[0];
 }
-static void dependencies(Lowerer *L, Node *e, const char **out, int *n, int cap);
-static void dependencies_list(Lowerer *L, NodeList *l, const char **out, int *n, int cap) {
-    for (int i = 0; i < l->count; i++) {
-        Node *s = l->items[i];
-        dependencies(L, s->expr, out, n, cap);
-        dependencies(L, s->target, out, n, cap);
-        dependencies_list(L, &s->body, out, n, cap);
-        dependencies_list(L, &s->other, out, n, cap);
-    }
+static bool watchable(Binding *b) { return b && (b->kind == B_REACTIVE || b->kind == B_COMPUTED); }
+static void add_dep(const char **out, int *n, int cap, const char *list) {
+    for (int i = 0; i < *n; i++)
+        if (!strcmp(out[i], list))
+            return;
+    if (*n < cap)
+        out[(*n)++] = list;
 }
-/* Reactive and computed variables read by an expression, in order of first use. */
+/* The watcher lists an expression depends on, in order of first use: those of the reactive and
+ * computed variables it reads, of the fields it reads, and of what the functions it calls read
+ * (top-level variables and fields). */
 static void dependencies(Lowerer *L, Node *e, const char **out, int *n, int cap) {
     if (!e)
         return;
-    if (e->kind == N_NAME) {
-        Binding *b = find(L, e->text);
-        if (b && (b->kind == B_REACTIVE || b->kind == B_COMPUTED)) {
-            bool seen = false;
-            for (int i = 0; i < *n; i++)
-                seen = seen || !strcmp(out[i], e->text);
-            if (!seen && *n < cap)
-                out[(*n)++] = e->text;
-        }
-    }
-    for (int i = 0; i < e->args.count; i++)
-        dependencies(L, e->args.items[i], out, n, cap);
-    if (e->fn)
-        dependencies_list(L, &e->fn->body, out, n, cap);
+    Reads r = {0};
+    scan(L, e, &r, NULL);
+    for (int i = 0; i < r.names.count; i++)
+        if (watchable(find(L, r.names.items[i])))
+            add_dep(out, n, cap, fmt(L, "__fwr_w_%s", r.names.items[i]));
+    for (int i = 0; i < r.fields.count; i++)
+        if (names_has(&L->fields, r.fields.items[i]))
+            add_dep(out, n, cap, fmt(L, "__fwr_field_%s", r.fields.items[i]));
+    Reads deep = called(L, &r);
+    for (int i = 0; i < deep.names.count; i++)
+        if (watchable(find_top(L, deep.names.items[i])))
+            add_dep(out, n, cap, fmt(L, "__fwr_w_%s", deep.names.items[i]));
+    for (int i = 0; i < deep.fields.count; i++)
+        if (names_has(&L->fields, deep.fields.items[i]))
+            add_dep(out, n, cap, fmt(L, "__fwr_field_%s", deep.fields.items[i]));
+    reads_free(&deep);
+    reads_free(&r);
 }
 static int require_dependencies(Lowerer *L, Node *e, const char *what, Node *at, const char **out, int cap) {
     int n = 0;
     dependencies(L, e, out, &n, cap);
     if (!n)
         parser_fail(L->P, at->line, at->col,
-                    "%s must read a variable, such as `alive` in `when alive do`; parameters and loop "
-                    "variables are not watched", what);
+                    "%s must read a variable or a field, such as `alive` in `when alive do`; parameters "
+                    "and loop variables are not watched", what);
     return n;
+}
+/* After a deferred `when`, every later statement of the block (and of the blocks inside it, but
+ * not of functions or lambdas) is followed by a check of the pending flag. */
+static void settle_after(Lowerer *L, NodeList *list, int from, int n, Node *at) {
+    for (int i = from; i < list->count; i++) {
+        Node *s = list->items[i];
+        if (s->kind == S_BREAK || s->kind == S_CONTINUE || s->kind == S_RETURN || s->kind == S_THROW)
+            continue;
+        if (s->kind != S_WHEN && s->kind != S_DEFER) {
+            settle_after(L, &s->body, 0, n, at);
+            settle_after(L, &s->other, 0, n, at);
+            settle_after(L, &s->finalizer, 0, n, at);
+            for (int c = 0; c < s->ncatches; c++)
+                settle_after(L, &s->catches[c], 0, n, at);
+        }
+        char *text = fmt(L, "if __fwr_pending%d do\n    __fwr_pending%d = false\n    __fwr_check%d()\nend\n", n, n, n);
+        nl_insert(L->P->arena, list, i + 1, gen(L, text, at).items[0]);
+        i++;
+    }
 }
 static void block(Lowerer *L, NodeList *list, bool top);
 static void function(Lowerer *L, FuncDecl *f);
@@ -793,7 +1041,7 @@ static void unregister_at_end(Lowerer *L, NodeList *list, int after, const char 
                               int ndeps, Node *at) {
     Buf text = {0};
     for (int i = 0; i < ndeps; i++)
-        buf_printf(&text, "__fwr_w_%s.remove(%s)\n", deps[i], closure);
+        buf_printf(&text, "%s.remove(%s)\n", deps[i], closure);
     Node *t = arena_alloc(L->P->arena, sizeof(Node));
     t->kind = S_TRY;
     t->line = at->line;
@@ -811,7 +1059,6 @@ static void insert_all(Lowerer *L, NodeList *list, int at, NodeList *items) {
         nl_insert(L->P->arena, list, at + i, items->items[i]);
 }
 #define MAX_DEPS 64
-
 static void block(Lowerer *L, NodeList *list, bool top) {
     push_scope(L);
     for (int i = 0; i < list->count; i++) {
@@ -832,12 +1079,12 @@ static void block(Lowerer *L, NodeList *list, bool top) {
                 buf_printf(&text, "var __fwr_update%d = function() returns void\n    %s = __fwr_compute%d()\nend\n",
                            n, s->name, n);
                 for (int d = 0; d < ndeps; d++)
-                    buf_printf(&text, "__fwr_w_%s.push(__fwr_update%d)\n", deps[d], n);
+                    buf_printf(&text, "%s.push(__fwr_update%d)\n", deps[d], n);
                 NodeList extra = gen(L, text.data, s);
                 free(text.data);
                 extra.items[0]->expr->fn->body.items[0]->expr = s->expr;
                 s->expr = extra.items[1]->target; /* y = __fwr_computeN() */
-                nl_push(L->P->arena, &extra.items[3]->expr->fn->body, notify(L, s->name, s));
+                nl_push(L->P->arena, &extra.items[3]->expr->fn->body, notify(L, fmt(L, "__fwr_w_%s", s->name), s));
                 s->op = "var";
                 bind(L, s->name, B_COMPUTED, NULL);
                 if (s->alias)
@@ -854,7 +1101,7 @@ static void block(Lowerer *L, NodeList *list, bool top) {
                 i = after - 1;
                 continue;
             }
-            bool reactive = (s->op && !strcmp(s->op, "reactive")) || promoted(L, s);
+            bool reactive = (s->op && !strcmp(s->op, "reactive")) || promoted(L, s, top);
             if (s->op && !strcmp(s->op, "reactive"))
                 s->op = "var";
             bind(L, s->name, reactive ? B_REACTIVE : B_PLAIN, NULL);
@@ -872,6 +1119,24 @@ static void block(Lowerer *L, NodeList *list, bool top) {
             expression(L, s->expr);
             if (s->target->kind != N_NAME) {
                 expression(L, s->target);
+                /* `x.health = 1` notifies the conditions that read a `.health`; `xs[0] = 1` and
+                 * `p.x = 1` notify the watchers of a reactive `xs` or `p`. */
+                int at = i + 1;
+                if ((s->target->kind == N_MEMBER || s->target->kind == N_INST) &&
+                    names_has(&L->fields, s->target->text))
+                    nl_insert(L->P->arena, list, at++, notify(L, fmt(L, "__fwr_field_%s", s->target->text), s));
+                Node *root = s->target;
+                while ((root->kind == N_MEMBER || root->kind == N_INDEX) && root->args.count > 0 && root->args.items[0])
+                    root = root->args.items[0];
+                if (root->kind == N_NAME) {
+                    Binding *b = find(L, root->text);
+                    if (b && b->kind == B_COMPUTED)
+                        parser_fail(L->P, s->line, s->col,
+                                    "cannot assign into computed value '%s'; it follows its expression", root->text);
+                    if (b && b->kind == B_REACTIVE)
+                        nl_insert(L->P->arena, list, at++, notify(L, fmt(L, "__fwr_w_%s", root->text), s));
+                }
+                i = at - 1;
                 continue;
             }
             Binding *b = find(L, s->target->text);
@@ -895,19 +1160,25 @@ static void block(Lowerer *L, NodeList *list, bool top) {
                 parser_fail(L->P, s->line, s->col, "cannot assign to computed value '%s'; it follows its expression",
                             s->target->text);
             if (b && b->kind == B_REACTIVE) {
-                nl_insert(L->P->arena, list, i + 1, notify(L, s->target->text, s));
+                nl_insert(L->P->arena, list, i + 1, notify(L, fmt(L, "__fwr_w_%s", s->target->text), s));
                 i++;
             }
             continue;
         }
         case S_WHEN: {
-            /* when cond do body end: a check closure that runs body on each false -> true change
-             * of cond, registered with every reactive variable cond reads, and run once now. */
+            /* when cond do body else do other end: a check closure that runs body on each false ->
+             * true change of cond and other on each true -> false change, registered with every
+             * watcher list cond depends on, and run once now. A deferred when registers a closure
+             * that only marks it pending; the check runs between the statements that follow. */
             expression(L, s->expr);
             const char *deps[MAX_DEPS];
             int ndeps = require_dependencies(L, s->expr, "a 'when' condition", s, deps, MAX_DEPS);
+            bool deferred = s->op && !strcmp(s->op, "defer");
             push_scope(L);
             block(L, &s->body, false);
+            pop_scope(L);
+            push_scope(L);
+            block(L, &s->other, false);
             pop_scope(L);
             int n = ++L->counter;
             Buf text = {0};
@@ -919,12 +1190,20 @@ static void block(Lowerer *L, NodeList *list, bool top) {
                        "            __fwr_armed%d = false\n"
                        "        end\n"
                        "    else do\n"
-                       "        __fwr_armed%d = true\n"
+                       "        if not __fwr_armed%d do\n"
+                       "            __fwr_armed%d = true\n"
+                       "        end\n"
                        "    end\n"
                        "end\n",
-                       n, n, n, n, n);
+                       n, n, n, n, n, n);
+            if (deferred)
+                buf_printf(&text,
+                           "var __fwr_pending%d = false\n"
+                           "var __fwr_mark%d = function() returns void\n    __fwr_pending%d = true\nend\n",
+                           n, n, n);
+            const char *watcher = fmt(L, deferred ? "__fwr_mark%d" : "__fwr_check%d", n);
             for (int d = 0; d < ndeps; d++)
-                buf_printf(&text, "__fwr_w_%s.push(__fwr_check%d)\n", deps[d], n);
+                buf_printf(&text, "%s.push(%s)\n", deps[d], watcher);
             buf_printf(&text, "__fwr_check%d()\n", n);
             NodeList extra = gen(L, text.data, s);
             free(text.data);
@@ -933,14 +1212,22 @@ static void block(Lowerer *L, NodeList *list, bool top) {
             Node *armed = test->body.items[0];
             for (int k = 0; k < s->body.count; k++)
                 nl_push(L->P->arena, &armed->body, s->body.items[k]);
+            Node *disarmed = test->other.items[0];
+            for (int k = 0; k < s->other.count; k++)
+                nl_push(L->P->arena, &disarmed->body, s->other.items[k]);
             memmove(&list->items[i], &list->items[i + 1], sizeof(Node *) * (size_t)(list->count - i - 1));
             list->count--;
             insert_all(L, list, i, &extra);
             int after = i + extra.count;
             bind(L, fmt(L, "__fwr_armed%d", n), B_PLAIN, NULL);
             bind(L, fmt(L, "__fwr_check%d", n), B_PLAIN, NULL);
+            if (deferred) {
+                bind(L, fmt(L, "__fwr_pending%d", n), B_PLAIN, NULL);
+                bind(L, fmt(L, "__fwr_mark%d", n), B_PLAIN, NULL);
+                settle_after(L, list, after, n, s);
+            }
             if (!top)
-                unregister_at_end(L, list, after, fmt(L, "__fwr_check%d", n), deps, ndeps, s);
+                unregister_at_end(L, list, after, watcher, deps, ndeps, s);
             i = after - 1;
             continue;
         }
@@ -1037,7 +1324,9 @@ void lower_reactive(Parser *P, Program *p) {
             any = uses_list(&p->classes[c].methods[m].body);
     if (!any)
         return;
-    Lowerer L = {P, NULL, 0, 0, 0, 0, NULL, 0, 0};
+    Lowerer L = {0};
+    L.P = P;
+    L.prog = p;
     watch_list(&L, &p->body);
     for (int i = 0; i < p->nfunctions; i++)
         watch_list(&L, &p->functions[i].body);
@@ -1051,11 +1340,21 @@ void lower_reactive(Parser *P, Program *p) {
         if (s->kind != S_DECLARE)
             continue;
         int kind = s->op && !strcmp(s->op, "computed") ? B_COMPUTED
-                   : (s->op && !strcmp(s->op, "reactive")) || promoted(&L, s) ? B_REACTIVE
+                   : (s->op && !strcmp(s->op, "reactive")) || promoted(&L, s, true) ? B_REACTIVE
                                                                                : B_PLAIN;
         bind(&L, s->name, kind, NULL);
         if (s->alias)
             bind(&L, s->alias, B_ALIAS, s->name);
+    }
+    L.top_count = L.count;
+    /* A watcher list for each field a condition reads, before anything can assign one. */
+    if (L.fields.count && p->body.count) {
+        Buf text = {0};
+        for (int i = 0; i < L.fields.count; i++)
+            buf_printf(&text, "array<function() returns void> __fwr_field_%s = []\n", L.fields.items[i]);
+        NodeList extra = gen(&L, text.data, p->body.items[0]);
+        free(text.data);
+        insert_all(&L, &p->body, 0, &extra);
     }
     for (int i = 0; i < p->nfunctions; i++)
         function(&L, &p->functions[i]);
@@ -1065,5 +1364,11 @@ void lower_reactive(Parser *P, Program *p) {
     block(&L, &p->body, true);
     pop_scope(&L);
     free(L.items);
-    free(L.watched);
+    free(L.watched.items);
+    free(L.watched_top.items);
+    free(L.fields.items);
+    for (int i = 0; i < L.ndirect; i++)
+        reads_free(&L.direct[i]);
+    free(L.direct);
+    free(L.direct_fn);
 }

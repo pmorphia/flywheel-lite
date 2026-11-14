@@ -1643,6 +1643,18 @@ static Node *statement(Parser *P) {
         return s;
     }
     if (accept(P, "defer")) {
+        /* `defer when condition do ... end`: a deferred when, checked between statements */
+        if (ptext(P, 0, "when") && peek(P, 0)->kind == T_ID) {
+            int saved = P->pos;
+            Node *w = statement(P);
+            if (w && w->kind == S_WHEN) {
+                w->op = "defer";
+                w->line = s->line;
+                w->col = s->col;
+                return w;
+            }
+            P->pos = saved;
+        }
         s->kind = S_DEFER;
         if (peek(P, 0)->kind == T_NL) {
             finish(P);
@@ -1669,7 +1681,7 @@ static Node *statement(Parser *P) {
         finish(P);
         return s;
     }
-    /* `when condition do ... end` (lowered by lower.c) */
+    /* `when condition do ... [else do ...] end` (lowered by lower.c) */
     if (ptext(P, 0, "when") && peek(P, 0)->kind == T_ID) {
         int saved = P->pos;
         Token *at = take(P);
@@ -1681,12 +1693,34 @@ static Node *statement(Parser *P) {
             s->expr = w.cond;
             if (runs(P)) {
                 run_body(P, &s->body);
+                /* `else run call`, on the same line or the next */
+                int after = P->pos;
+                newlines(P);
+                if (ptext(P, 0, "else") && peek(P, 0)->kind == T_ID) {
+                    take(P);
+                    if (runs(P)) {
+                        run_body(P, &s->other);
+                        finish(P);
+                        return s;
+                    }
+                }
+                P->pos = after;
                 finish(P);
                 return s;
             }
             take(P); /* do */
             finish(P);
             block(P, &s->body);
+            if (accept(P, "else")) {
+                if (runs(P)) {
+                    run_body(P, &s->other);
+                    finish(P);
+                    return s;
+                }
+                expect(P, "do");
+                finish(P);
+                block(P, &s->other);
+            }
             expect(P, "end");
             finish(P);
             return s;
