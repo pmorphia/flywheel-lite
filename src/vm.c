@@ -698,6 +698,25 @@ bool vm_quantity_in(VM *vm, Value x, Value unit, Value *out) {
     return quantity_call(vm, x, "__fwu_to_named", 1, &unit, out);
 }
 /* op is one of + - * / // % == != < <= > >=; comparisons produce a bool. */
+static bool quantity_binary(VM *vm, const char *op, Value a, Value b, Value *out);
+/* -1, 0 or 1 for two quantities (math.min, max, clamp, sorting); false after an error. */
+bool vm_quantity_compare(VM *vm, Value a, Value b, int *out) {
+    Value r;
+    if (!quantity_binary(vm, "<", a, b, &r))
+        return false;
+    if (r.as.b) {
+        *out = -1;
+        return true;
+    }
+    if (!quantity_binary(vm, ">", a, b, &r))
+        return false;
+    *out = r.as.b ? 1 : 0;
+    return true;
+}
+bool vm_is_quantity(Value v) {
+    QuantityKind q;
+    return quantity_of(v, &q);
+}
 static bool quantity_binary(VM *vm, const char *op, Value a, Value b, Value *out) {
     QuantityKind qa, qb;
     bool isa = quantity_of(a, &qa), isb = quantity_of(b, &qb);
@@ -723,7 +742,8 @@ static bool quantity_binary(VM *vm, const char *op, Value a, Value b, Value *out
                 return ok;
             }
         }
-        if (same && (!strcmp(op, "+") || !strcmp(op, "-") || !strcmp(op, "/") || comparison)) {
+        if (same && (!strcmp(op, "+") || !strcmp(op, "-") || !strcmp(op, "%") || !strcmp(op, "/") ||
+                     comparison)) {
             if (qa.real != qb.real) {
                 if (!quantity_real(vm, a, op, &x))
                     return false;
@@ -736,6 +756,7 @@ static bool quantity_binary(VM *vm, const char *op, Value a, Value b, Value *out
             push_root(vm, x);
             push_root(vm, y);
             const char *method = !strcmp(op, "+") ? "__fwu_add" : !strcmp(op, "-") ? "__fwu_sub"
+                                 : !strcmp(op, "%")  ? "__fwu_mod"
                                  : !strcmp(op, "/")  ? "__fwu_ratio"
                                                      : "__fwu_cmp";
             bool ok = quantity_call(vm, x, method, 1, &y, &r);
@@ -787,7 +808,7 @@ static bool quantity_binary(VM *vm, const char *op, Value a, Value b, Value *out
         if (!same)
             return vm_throw(vm, "TypeError", "cannot use %s on %s and %s: they are in different unit namespaces", op,
                             da, db);
-        return vm_throw(vm, "TypeError", "operator %s is not defined for quantities; use + - * / and comparisons",
+        return vm_throw(vm, "TypeError", "operator %s is not defined for quantities; use + - * / %% and comparisons",
                         op);
     }
     Value q = isa ? a : b, n = isa ? b : a;

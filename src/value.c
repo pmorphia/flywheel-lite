@@ -489,6 +489,8 @@ bool value_compare(VM *vm, Value a, Value b, int *out) {
         *out = (int)a.as.b - (int)b.as.b;
         return true;
     }
+    if (vm_is_quantity(a) || vm_is_quantity(b))
+        return vm_quantity_compare(vm, a, b, out);
     if (IS_OBJT(a, OBJ_ENUMVAL) && IS_OBJT(b, OBJ_ENUMVAL)) {
         int x = ((ObjEnumVal *)AS_OBJ(a))->index, y = ((ObjEnumVal *)AS_OBJ(b))->index;
         *out = x < y ? -1 : x > y;

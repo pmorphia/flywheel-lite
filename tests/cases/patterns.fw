@@ -89,7 +89,7 @@ var [first, _, third] = ["x", "y", "z"]
 print low, high, first, third
 
 int? maybe = null
-print maybe ?? 7
+print maybe otherwise 7
 maybe = 5
 match maybe
     case null do

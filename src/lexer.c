@@ -185,7 +185,7 @@ static bool markup_argument_start(const char *s, size_t n, size_t p) {
     while (p < n && lx_start((unsigned char)s[p])) {
         size_t begin = p;
         NAME();
-        static const char *ops[] = {"and", "or", "not", "in", "is", "as", NULL};
+        static const char *ops[] = {"and", "or", "not", "in", "is", "as", "otherwise", NULL};
         for (int i = 0; ops[i]; i++)
             if (strlen(ops[i]) == p - begin && memcmp(ops[i], s + begin, p - begin) == 0)
                 return false;
@@ -370,7 +370,7 @@ static bool lex_text(Arena *arena, const char *src, size_t len, TokenList *out, 
                 Token *last = &out->items[out->count - 1];
                 static const char *joins[] = {"+",  "-",  "*",  "/",  "//", "%",  "==", "!=",
                                               "<=", ">=", "=",  "+=", "-=", "*=", "/=", "//=",
-                                              "%=", "..", "..<", ",", "=>", "??", NULL};
+                                              "%=", "..", "..<", ",", "=>", NULL};
                 bool join = false;
                 if (last->kind == T_OP)
                     for (int i = 0; joins[i]; i++)
@@ -380,7 +380,8 @@ static bool lex_text(Arena *arena, const char *src, size_t len, TokenList *out, 
                                 (tok_is(&out->items[out->count - 2], ".") ||
                                  tok_is(&out->items[out->count - 2], ":"));
                 if ((join && !wildcard) ||
-                    (last->kind == T_ID && (tok_is(last, "and") || tok_is(last, "or")))) {
+                    (last->kind == T_ID &&
+                     (tok_is(last, "and") || tok_is(last, "or") || tok_is(last, "otherwise")))) {
                     advance(&L, L.p + 1);
                     continue;
                 }

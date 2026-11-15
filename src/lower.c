@@ -450,8 +450,8 @@ static void generate_units(Parser *P, Program *p, const UnitNs *imported, int ni
                            "        return this.value * m\n"
                            "    end\n",
                            N, at_self, N, N, "float", N);
-                const char *ops[2][2] = {{"add", "+"}, {"sub", "-"}};
-                for (int o = 0; o < 2; o++)
+                const char *ops[3][2] = {{"add", "+"}, {"sub", "-"}, {"mod", "%"}};
+                for (int o = 0; o < 3; o++)
                     buf_printf(out,
                                "    function __fwu_%s(%s o) returns %s\n"
                                "        var j = __fwu_%s__finer%s\n"
@@ -492,8 +492,8 @@ static void generate_units(Parser *P, Program *p, const UnitNs *imported, int ni
                            "    end\n",
                            D, D, D, D);
             } else {
-                const char *ops[2][2] = {{"add", "+"}, {"sub", "-"}};
-                for (int o = 0; o < 2; o++)
+                const char *ops[3][2] = {{"add", "+"}, {"sub", "-"}, {"mod", "%"}};
+                for (int o = 0; o < 3; o++)
                     buf_printf(out,
                                "    function __fwu_%s(%s o) returns %s\n"
                                "        var j = __fwu_%s__finer%s\n"
@@ -551,6 +551,11 @@ static void generate_units(Parser *P, Program *p, const UnitNs *imported, int ni
                                rel[r].result_unit, rel[r].result_unit);
                 }
             }
+            buf_printf(out,
+                       "    function __fwu_abs() returns %s\n"
+                       "        return %s(-this.value if this.value < %s else this.value, this.__fwu_unit)\n"
+                       "    end\n",
+                       C, C, is_int ? "0" : "0.0");
             buf_printf(out,
                        "    function __fwu_ratio(%s o) returns double\n"
                        "        var j = __fwu_%s__finer%s\n"

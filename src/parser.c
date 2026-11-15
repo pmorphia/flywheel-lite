@@ -150,7 +150,7 @@ static const char *reserved_words[] = {
     "else", "while", "do", "for", "in", "end", "break", "continue", "try", "catch",
     "finally", "throw", "this", "attr", "true", "false", "null", "void",
     "weak", "and", "or", "not", "enum", "interface", "extends", "implements", "match", "case",
-    "super", "is", "elements", "defer", "which", "unless", NULL};
+    "super", "is", "elements", "defer", "which", "unless", "otherwise", NULL};
 static bool in_list(const Token *t, const char **list) {
     for (int i = 0; list[i]; i++)
         if (tis(t, list[i]))
@@ -224,7 +224,7 @@ static int precedence(const Token *t) {
         return 4;
     if (tis(t, "as"))
         return 9;
-    if (tis(t, "??"))
+    if (tis(t, "otherwise"))
         return 5;
     if (tis(t, "..") || tis(t, "..<"))
         return 6;
@@ -855,7 +855,7 @@ static Node *prefix(Parser *P) {
         /* A quantity literal: a number with a unit right after it, 100m, 0.32km, 15time.s. */
         static const char *not_units[] = {"and", "or", "not", "in", "is", "as", "do", "else",
                                           "end", "which", "with", "returns", "if", "for", "while",
-                                          "true", "false", "null", NULL};
+                                          "true", "false", "null", "otherwise", NULL};
         Token *u = peek(P, 0);
         if (u->kind == T_ID && !u->spaced && !in_list(u, not_units)) {
             take(P);
@@ -965,7 +965,7 @@ static Node *prefix(Parser *P) {
             "function", "class", "component", "import", "returns", "return",
             "if", "else", "while", "do", "for", "in", "end", "break", "continue", "try",
             "catch", "finally", "throw", "as", "void", "weak", "and", "or", "enum", "interface",
-            "extends", "implements", "case", "is", "which", "unless", NULL};
+            "extends", "implements", "case", "is", "which", "unless", "otherwise", NULL};
         if (in_list(t, structural)) {
             char nm[64];
             snprintf(nm, sizeof nm, "%.*s", t->len, t->text);
@@ -1064,6 +1064,8 @@ static Node *expression(Parser *P, int level) {
 static Node *operators(Parser *P, Node *e, int level) {
     for (;;) {
         Token *op = peek(P, 0);
+        if (op->kind == T_OP && tis(op, "??"))
+            pfail_at(P, op->line, op->col, "'?\?' was renamed to 'otherwise': write 'a otherwise b'%s", "");
         if (!((op->kind == T_OP || op->kind == T_ID) && precedence(op) > level))
             break;
         if (tis(op, "is") || tis(op, "as")) {
@@ -1092,7 +1094,8 @@ static Node *operators(Parser *P, Node *e, int level) {
                 continue;
             }
         }
-        Node *n = tnode(P, N_BINARY, ops, op);
+        /* `a otherwise b` is the null fallback, internally the binary operator "??" */
+        Node *n = tnode(P, N_BINARY, !strcmp(ops, "otherwise") ? "??" : ops, op);
         nl_push(P->arena, &n->args, e);
         nl_push(P->arena, &n->args, expression(P, prec));
         e = n;

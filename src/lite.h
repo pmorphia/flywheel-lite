@@ -663,6 +663,8 @@ bool quantity_class_name(const char *name, char *ns, size_t nscap, bool *real);
 void unit_key(char *out, size_t cap, const char *module, const char *ns);
 /* `x in u` for a unit u of x's namespace or of one that `unitconv A = B` relates (vm.c). */
 bool vm_quantity_in(VM *vm, Value x, Value unit, Value *out);
+bool vm_quantity_compare(VM *vm, Value a, Value b, int *out);
+bool vm_is_quantity(Value v);
 void free_unit_exports(void *exports, int count); /* compiler.c */
 bool vm_type_test(VM *vm, Value v, ObjTypeDesc *t);
 bool vm_cast(VM *vm, ObjTypeDesc *t, Value v, Value *out);

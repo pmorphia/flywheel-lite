@@ -310,6 +310,10 @@ NATIVE(m_is_finite) {
 }
 NATIVE(m_abs) {
     (void)argc;
+    if (vm_is_quantity(args[0])) { /* math.abs(-3m) is 3m */
+        Value method = vm_find_method(AS_INSTANCE(args[0])->klass, str_intern_c(vm, "__fwu_abs"));
+        return vm_call(vm, val_obj(new_bound(vm, args[0], method)), 0, NULL, out);
+    }
     if (IS_INT(args[0])) {
         if (args[0].as.i == INT64_MIN)
             return vm_throw(vm, "NumericError", "abs of the minimum integer overflows");

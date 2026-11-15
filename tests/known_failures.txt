@@ -13,4 +13,5 @@ positive/destructors           # destructors run at collection or exit, not when
 positive/os_background_processes  # os.start, os.alive, os.wait, os.kill, and os.pid are not implemented
 positive/struct_values             # `struct` value types (Flywheel 2.20) are not implemented
 positive/struct_storage            # `struct` value types (Flywheel 2.20) are not implemented
+positive/quantity_struct_fields     # `struct` value types (Flywheel 2.20) are not implemented
 positive/gc_controls               # gc.step, gc.pause, gc.resume, gc.paused, and gc.threshold are not implemented
