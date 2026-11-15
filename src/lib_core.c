@@ -138,6 +138,166 @@ NATIVE(n_weak) {
     return true;
 }
 
+/* deep_copy: everything a value reaches, keeping its shape (an object reached twice is copied
+ * once, so sharing and cycles survive). Strings, functions, classes, modules, elements, files,
+ * errors, and instances of classes with a destructor are shared, as in the compiler. */
+typedef struct {
+    Obj **from, **to;
+    int count, cap;
+    ObjWeak **weaks;
+    int nweaks, weak_cap;
+} Copier;
+static uint32_t copier_slot(Copier *c, Obj *o) {
+    uintptr_t h = (uintptr_t)o;
+    h ^= h >> 17;
+    h *= 0xed5ad4bbu;
+    return (uint32_t)(h & (uintptr_t)(c->cap - 1));
+}
+static Obj *copier_find(Copier *c, Obj *o) {
+    if (!c->cap)
+        return NULL;
+    for (uint32_t s = copier_slot(c, o);; s = (s + 1) & (uint32_t)(c->cap - 1)) {
+        if (!c->from[s])
+            return NULL;
+        if (c->from[s] == o)
+            return c->to[s];
+    }
+}
+static void copier_put(Copier *c, Obj *o, Obj *copy) {
+    if ((c->count + 1) * 2 > c->cap) {
+        Copier bigger = *c;
+        bigger.cap = c->cap ? c->cap * 2 : 64;
+        bigger.count = 0;
+        bigger.from = calloc((size_t)bigger.cap, sizeof(Obj *));
+        bigger.to = calloc((size_t)bigger.cap, sizeof(Obj *));
+        for (int i = 0; i < c->cap; i++)
+            if (c->from[i])
+                copier_put(&bigger, c->from[i], c->to[i]);
+        free(c->from);
+        free(c->to);
+        c->from = bigger.from;
+        c->to = bigger.to;
+        c->cap = bigger.cap;
+    }
+    uint32_t s = copier_slot(c, o);
+    while (c->from[s])
+        s = (s + 1) & (uint32_t)(c->cap - 1);
+    c->from[s] = o;
+    c->to[s] = copy;
+    c->count++;
+}
+static bool deep_value(VM *vm, Copier *c, Value v, Value *out);
+static bool deep_object(VM *vm, Copier *c, Obj *o, Obj **out) {
+    Obj *done = copier_find(c, o);
+    if (done) {
+        *out = done;
+        return true;
+    }
+    switch (o->type) {
+    case OBJ_ARRAY:
+    case OBJ_TUPLE: {
+        ObjList *src = (ObjList *)o, *dst = new_list(vm, o->type, src->count);
+        copier_put(c, o, (Obj *)dst);
+        dst->frozen = src->frozen;
+        for (int i = 0; i < src->count; i++) {
+            Value item;
+            if (!deep_value(vm, c, src->items[i], &item))
+                return false;
+            dst->items[dst->count++] = item;
+        }
+        *out = (Obj *)dst;
+        return true;
+    }
+    case OBJ_MAP:
+    case OBJ_SET: {
+        ObjMap *src = (ObjMap *)o, *dst = new_map(vm, o->type);
+        copier_put(c, o, (Obj *)dst);
+        for (int i = 0; i < src->used; i++) {
+            if (!src->entries[i].live)
+                continue;
+            Value key, value;
+            if (!deep_value(vm, c, src->entries[i].key, &key) ||
+                !deep_value(vm, c, src->entries[i].value, &value) || !map_set(vm, dst, key, value))
+                return false;
+        }
+        dst->frozen = src->frozen;
+        *out = (Obj *)dst;
+        return true;
+    }
+    case OBJ_INSTANCE: {
+        ObjInstance *src = (ObjInstance *)o;
+        if (src->klass->has_destructor)
+            break;
+        ObjInstance *dst = new_instance(vm, src->klass);
+        copier_put(c, o, (Obj *)dst);
+        for (int i = 0; i < src->nfields && i < dst->nfields; i++)
+            if (!deep_value(vm, c, src->fields[i], &dst->fields[i]))
+                return false;
+        *out = (Obj *)dst;
+        return true;
+    }
+    case OBJ_RESULT: {
+        ObjResult *src = (ObjResult *)o, *dst = new_result(vm, src->ok, val_null());
+        copier_put(c, o, (Obj *)dst);
+        if (!deep_value(vm, c, src->value, &dst->value))
+            return false;
+        *out = (Obj *)dst;
+        return true;
+    }
+    case OBJ_JSON: {
+        ObjJson *src = (ObjJson *)o, *dst = new_json(vm, val_null());
+        copier_put(c, o, (Obj *)dst);
+        if (!deep_value(vm, c, src->v, &dst->v))
+            return false;
+        *out = (Obj *)dst;
+        return true;
+    }
+    case OBJ_WEAK: {
+        ObjWeak *src = (ObjWeak *)o, *dst = new_weak(vm, src->target);
+        copier_put(c, o, (Obj *)dst);
+        if (c->nweaks == c->weak_cap) {
+            c->weak_cap = c->weak_cap ? c->weak_cap * 2 : 8;
+            c->weaks = realloc(c->weaks, sizeof(ObjWeak *) * (size_t)c->weak_cap);
+        }
+        c->weaks[c->nweaks++] = dst;
+        *out = (Obj *)dst;
+        return true;
+    }
+    default:
+        break;
+    }
+    *out = o; /* shared */
+    return true;
+}
+static bool deep_value(VM *vm, Copier *c, Value v, Value *out) {
+    if (!IS_OBJ(v)) {
+        *out = v;
+        return true;
+    }
+    Obj *copy;
+    if (!deep_object(vm, c, AS_OBJ(v), &copy))
+        return false;
+    *out = val_obj(copy);
+    return true;
+}
+NATIVE(n_deep_copy) {
+    UNUSED_ARGS;
+    Copier c = {0};
+    vm->gc_off++;
+    bool ok = deep_value(vm, &c, args[0], out);
+    /* Weak references to copied objects point at the copies. */
+    for (int i = 0; ok && i < c.nweaks; i++) {
+        Obj *copy = c.weaks[i]->target ? copier_find(&c, c.weaks[i]->target) : NULL;
+        if (copy)
+            c.weaks[i]->target = copy;
+    }
+    vm->gc_off--;
+    free(c.from);
+    free(c.to);
+    free(c.weaks);
+    return ok;
+}
+
 /* ---------------------------------------------------------------- casts */
 
 bool to_int64(VM *vm, Value v, int64_t *out, const char *what) {
@@ -2077,6 +2237,7 @@ void lib_core_init(VM *vm) {
     builtin(vm, "len", n_len, 1, 1);
     builtin(vm, "typeof", n_typeof, 1, 1);
     builtin(vm, "weak", n_weak, 1, 1);
+    builtin(vm, "deep_copy", n_deep_copy, 1, 1);
     cast_builtin(vm, "int", simple_type(vm, TY_INT, 64, false));
     cast_builtin(vm, "i64", simple_type(vm, TY_INT, 64, false));
     cast_builtin(vm, "i32", simple_type(vm, TY_INT, 32, false));

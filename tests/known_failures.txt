@@ -15,3 +15,4 @@ positive/struct_values             # `struct` value types (Flywheel 2.20) are no
 positive/struct_storage            # `struct` value types (Flywheel 2.20) are not implemented
 positive/quantity_struct_fields     # `struct` value types (Flywheel 2.20) are not implemented
 positive/gc_controls               # gc.step, gc.pause, gc.resume, gc.paused, and gc.threshold are not implemented
+positive/deep_copy_graph           # uses a `struct` (Flywheel 2.20), which is not implemented; deep_copy itself works

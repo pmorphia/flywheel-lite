@@ -5,8 +5,8 @@ not a new language: it reads the same source as the Flywheel compiler and aims t
 output. Where the compiler builds a native executable through LLVM, Flywheel Lite compiles a file to
 bytecode in memory and runs it straight away.
 
-Flywheel Lite is currently in its **beta** phase: version **2.12 (beta-12)**, following Flywheel
-2.25 (`flywheel-lite --version`).
+Flywheel Lite is currently in its **beta** phase: version **2.13 (beta-13)**, following Flywheel
+2.26 (`flywheel-lite --version`).
 
 Why it exists:
 
@@ -111,8 +111,11 @@ imports with aliases, wildcards and `private`.
 
 Native modules: `math`, `fs`, `os` (including `run`, `process`, `pipeline` with captured output
 and timeouts), `time`, `io`, `json` (parse, encode, typed `decode`, `Class.from_json`,
-`<json>` literals), `testing`, `collections`, `encoding`, `uuid`, `gc`, and `html`/`svg`
+`<json>` literals), `testing`, `collections`, `encoding`, `uuid`, `gc`, `hot` (`hot.reload()` and
+`hot.enabled()` are always `false`: hot reload is the compiler's `--hot`), and `html`/`svg`
 (rendering, `html.parse`, CSS selector queries, mutation, parent and sibling links).
+`deep_copy(value)` copies a whole object graph as in the compiler, and `random.Generator(seed)`
+produces the same numbers as the compiler's for the same seed.
 
 Not available in Flywheel Lite (importing one reports it clearly; use the Flywheel compiler for these):
 `web`, `net`, `thread`, `sqlite`, `regex`, `desktop`, `crypto`, `compress`, `toml`, `yaml`,

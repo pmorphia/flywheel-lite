@@ -2219,9 +2219,14 @@ bool lib_is_native_module(const char *name) {
     return false;
 }
 
+NATIVE(hot_never) {
+    (void)vm, (void)argc, (void)args;
+    *out = val_bool(false);
+    return true;
+}
 ObjModule *lib_native_module(VM *vm, const char *name) {
     static const char *known[] = {"math", "fs", "os", "time", "io", "json", "testing", "collections",
-                                  "encoding", "uuid", "html", "svg", "gc", "core", NULL};
+                                  "encoding", "uuid", "html", "svg", "gc", "core", "hot", NULL};
     bool ok = false;
     for (int i = 0; known[i]; i++)
         if (!strcmp(known[i], name))
@@ -2267,6 +2272,10 @@ ObjModule *lib_native_module(VM *vm, const char *name) {
         lib_html_module(vm, m);
         module_set_native(vm, m, "render", h_render, 1, 1);
         module_set_native(vm, m, "escape", h_escape, 1, 1);
+    } else if (!strcmp(name, "hot")) {
+        /* Hot reload is the native compiler's (flywheel --hot); here it never reloads. */
+        module_set_native(vm, m, "reload", hot_never, 0, 0);
+        module_set_native(vm, m, "enabled", hot_never, 0, 0);
     } else if (!strcmp(name, "gc")) {
         module_set_native(vm, m, "collect", gc_collect_native, 0, 0);
         module_set_native(vm, m, "pending", gc_pending, 0, 0);
