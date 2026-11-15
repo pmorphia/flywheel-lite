@@ -5,8 +5,8 @@ not a new language: it reads the same source as the Flywheel compiler and aims t
 output. Where the compiler builds a native executable through LLVM, Flywheel Lite compiles a file to
 bytecode in memory and runs it straight away.
 
-Flywheel Lite is currently in its **beta** phase: version **2.11 (beta-11)**, following Flywheel
-2.24 (`flywheel-lite --version`).
+Flywheel Lite is currently in its **beta** phase: version **2.12 (beta-12)**, following Flywheel
+2.25 (`flywheel-lite --version`).
 
 Why it exists:
 
@@ -89,7 +89,7 @@ status 1. Set `LITE_TRACE=1` for a full stack trace.
 ## What runs
 
 The whole core language: declarations and `const`, numeric rules (checked 64-bit overflow, `/`
-and `//`, `%`), chained comparisons, `??`, ranges and slices, parentheses-free calls, string
+and `//`, `%`), chained comparisons, `otherwise` (the null fallback, formerly `??`), ranges and slices, parentheses-free calls, string
 interpolation with format specs, functions with defaults, closures with shared captures and
 fresh per-iteration loop bindings, classes with generated constructors and `init`, inheritance
 and `super`, interfaces, operator methods, `to_string`, `hash`/`equals` keys, the iterator
@@ -101,7 +101,7 @@ nullable values, `try`/`catch`/`finally`, named errors, declared error types (`e
 negated bool aliases (`bool on/off`), units (`unitns name`, `unit`, `unitconv`, quantity
 literals such as `100m`, quantity types of any numeric type such as `u8[time]` and
 `float[metric.length]`, `x in cm`, `type`/`unit`/`unitns`, units shared across modules, `unitconv A = B`
-between namespaces (`1m + 1ft`), and the `metric`, `imperial`, and `time` unit libraries),
+between namespaces (`1m + 1ft`), `%` and `math.min`/`max`/`clamp`/`abs` on quantities, and the `metric`, `imperial`, and `time` unit libraries),
 arrays/tuples/maps/sets with their methods, `freeze`, casts and conversions, markup literals,
 components (also qualified by module, `<cogwheel.heading>`; including `void component`s, used like
 `<br>` with no closing tag), element families, void tags and components written without a closing
