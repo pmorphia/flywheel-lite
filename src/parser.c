@@ -150,7 +150,7 @@ static const char *reserved_words[] = {
     "else", "while", "do", "for", "in", "end", "break", "continue", "try", "catch",
     "finally", "throw", "this", "attr", "true", "false", "null", "void",
     "weak", "and", "or", "not", "enum", "interface", "extends", "implements", "match", "case",
-    "super", "is", "elements", "defer", "which", NULL};
+    "super", "is", "elements", "defer", "which", "unless", NULL};
 static bool in_list(const Token *t, const char **list) {
     for (int i = 0; list[i]; i++)
         if (tis(t, list[i]))
@@ -825,6 +825,8 @@ static Node *parse_markup(Parser *P) {
 
 static Node *lambda(Parser *P);
 static Node *spawn(Parser *P);
+static Node *match_expression(Parser *P);
+static void match_cases(Parser *P, Node *s, bool arrows);
 
 static Node *prefix(Parser *P) {
     Token *t = peek(P, 0);
@@ -953,6 +955,8 @@ static Node *prefix(Parser *P) {
         e = spawn(P);
     } else if (t->kind == T_ID && tis(t, "function") && ptext(P, 1, "(")) {
         e = lambda(P);
+    } else if (t->kind == T_ID && tis(t, "match")) {
+        e = match_expression(P);
     } else if (t->kind == T_ID && tis(t, "weak") && ptext(P, 1, "(")) {
         take(P);
         e = tnode(P, N_NAME, "weak", t);
@@ -961,7 +965,7 @@ static Node *prefix(Parser *P) {
             "function", "class", "component", "import", "returns", "return",
             "if", "else", "while", "do", "for", "in", "end", "break", "continue", "try",
             "catch", "finally", "throw", "as", "void", "weak", "and", "or", "enum", "interface",
-            "extends", "implements", "match", "case", "is", "which", NULL};
+            "extends", "implements", "case", "is", "which", "unless", NULL};
         if (in_list(t, structural)) {
             char nm[64];
             snprintf(nm, sizeof nm, "%.*s", t->len, t->text);
@@ -1286,7 +1290,7 @@ static void spec_pattern_type(Parser *P, void *ctx) {
     TypeBinding *b = ctx;
     b->type = parse_type(P);
     b->name = tstr(P, identifier(P));
-    if (!ptext(P, 0, "do") && !ptext(P, 0, "if"))
+    if (!ptext(P, 0, P->match_arrows ? "=>" : "do") && !ptext(P, 0, "if"))
         pfail(P, "pattern%s", "");
 }
 typedef struct {
@@ -1329,7 +1333,7 @@ static void run_body(Parser *P, NodeList *out) {
         "import", "var",   "const",    "class", "function", "component", "return",   "if",
         "else",  "while",    "do",    "for",      "end",       "break",    "continue",
         "try",    "catch", "finally",  "throw", "match",    "case",      "defer",    "when",
-        "reactive", "computed", "assert", "enum", "interface", NULL};
+        "reactive", "computed", "assert", "enum", "interface", "unless", NULL};
     if (t->kind == T_ID && in_list(t, keywords) && !(tis(t, "function") && ptext(P, 1, "(")))
         pfail(P, RUN_USAGE ", not '%s'", tstr(P, t));
     Node *s = tnode(P, S_EXPR, NULL, t);
@@ -1370,7 +1374,7 @@ static void run_else(Parser *P, Node *s) {
             finish(P);
             return;
         }
-        if (ptext(P, 0, "if") && peek(P, 0)->kind == T_ID) {
+        if ((ptext(P, 0, "if") || ptext(P, 0, "unless")) && peek(P, 0)->kind == T_ID) {
             int if_pos = P->pos;
             take(P);
             bool chained = speculate(P, spec_run_condition, NULL);
@@ -1515,9 +1519,16 @@ static Node *statement(Parser *P) {
         finish(P);
         return s;
     }
-    if (accept(P, "if")) {
+    if (peek(P, 0)->kind == T_ID && (ptext(P, 0, "if") || ptext(P, 0, "unless"))) {
+        /* `unless condition` is `if not (condition)` */
+        bool negated = tis(take(P), "unless");
         s->kind = S_IF;
         s->expr = expression(P, 0);
+        if (negated) {
+            Node *n = node(P, N_UNARY, "not", s->expr->line, s->expr->col);
+            nl_push(P->arena, &n->args, s->expr);
+            s->expr = n;
+        }
         if (runs(P)) {
             run_body(P, &s->body);
             run_else(P, s);
@@ -1527,7 +1538,7 @@ static Node *statement(Parser *P) {
         finish(P);
         block(P, &s->body);
         if (accept(P, "else")) {
-            if (ptext(P, 0, "if")) {
+            if (ptext(P, 0, "if") || ptext(P, 0, "unless")) {
                 nl_push(P->arena, &s->other, statement(P));
                 return s;
             }
@@ -1548,61 +1559,7 @@ static Node *statement(Parser *P) {
         s->kind = S_MATCH;
         s->expr = expression(P, 0);
         finish(P);
-        int cap = 0;
-        while (accept(P, "case")) {
-            TypeBinding b = {NULL, NULL};
-            int saved = P->pos;
-            if (!speculate(P, spec_pattern_type, &b)) {
-                P->pos = saved;
-                b.type = b.name = NULL;
-            }
-            if (s->ncatches == cap) {
-                int nc = GROW_CAP(cap);
-                const char **types = arena_alloc(P->arena, sizeof(char *) * (size_t)nc);
-                const char **names = arena_alloc(P->arena, sizeof(char *) * (size_t)nc);
-                NodeList *pats = arena_alloc(P->arena, sizeof(NodeList) * (size_t)nc);
-                NodeList *bodies = arena_alloc(P->arena, sizeof(NodeList) * (size_t)nc);
-                Node **guards = arena_alloc(P->arena, sizeof(Node *) * (size_t)nc);
-                if (cap) {
-                    memcpy(types, s->catch_types, sizeof(char *) * (size_t)cap);
-                    memcpy(names, s->catch_names, sizeof(char *) * (size_t)cap);
-                    memcpy(pats, s->patterns, sizeof(NodeList) * (size_t)cap);
-                    memcpy(bodies, s->catches, sizeof(NodeList) * (size_t)cap);
-                    memcpy(guards, s->guards, sizeof(Node *) * (size_t)cap);
-                }
-                s->catch_types = types;
-                s->catch_names = names;
-                s->patterns = pats;
-                s->catches = bodies;
-                s->guards = guards;
-                cap = nc;
-            }
-            int i = s->ncatches++;
-            s->catch_types[i] = b.type;
-            s->catch_names[i] = b.name;
-            memset(&s->patterns[i], 0, sizeof(NodeList));
-            memset(&s->catches[i], 0, sizeof(NodeList));
-            if (!b.type) {
-                P->no_ternary = true;
-                do {
-                    nl_push(P->arena, &s->patterns[i], expression(P, 0));
-                } while (accept(P, ","));
-                P->no_ternary = false;
-            }
-            s->guards[i] = accept(P, "if") ? expression(P, 0) : NULL;
-            expect(P, "do");
-            finish(P);
-            block(P, &s->catches[i]);
-        }
-        if (accept(P, "else")) {
-            s->has_else = true;
-            expect(P, "do");
-            finish(P);
-            block(P, &s->other);
-        }
-        if (s->ncatches == 0 && !s->has_else)
-            pfail_at(P, s->line, s->col, "match requires at least one case%s", "");
-        expect(P, "end");
+        match_cases(P, s, false);
         finish(P);
         return s;
     }
@@ -1853,6 +1810,113 @@ static Node *spawn(Parser *P) {
     r->expr = target;
     nl_push(P->arena, &f->body, r);
     Node *e = tnode(P, N_SPAWN, "", t);
+    e->fn = f;
+    return e;
+}
+/* The cases of a match, through its `end`. In a match expression (`arrows`) each case is
+ * `case pattern => value` and the else `else => value`: each value becomes a return in the
+ * body of the function the expression runs. */
+static void match_body(Parser *P, NodeList *out, bool arrows) {
+    if (!arrows) {
+        expect(P, "do");
+        finish(P);
+        block(P, out);
+        return;
+    }
+    expect(P, "=>");
+    Token *at = peek(P, 0);
+    Node *r = tnode(P, S_RETURN, NULL, at);
+    r->expr = expression(P, 0);
+    nl_push(P->arena, out, r);
+    if (peek(P, 0)->kind == T_NL)
+        finish(P); /* or the next case follows on the same line */
+    else if (!ptext(P, 0, "case") && !ptext(P, 0, "else") && !ptext(P, 0, "end"))
+        pfail(P, "expected the next case or 'end', got '%s'", tstr(P, peek(P, 0)));
+}
+static void match_cases(Parser *P, Node *s, bool arrows) {
+    int cap = 0;
+    P->match_arrows = arrows;
+    while (accept(P, "case")) {
+        TypeBinding b = {NULL, NULL};
+        int saved = P->pos;
+        if (!speculate(P, spec_pattern_type, &b)) {
+            P->pos = saved;
+            b.type = b.name = NULL;
+        }
+        if (s->ncatches == cap) {
+            int nc = GROW_CAP(cap);
+            const char **types = arena_alloc(P->arena, sizeof(char *) * (size_t)nc);
+            const char **names = arena_alloc(P->arena, sizeof(char *) * (size_t)nc);
+            NodeList *pats = arena_alloc(P->arena, sizeof(NodeList) * (size_t)nc);
+            NodeList *bodies = arena_alloc(P->arena, sizeof(NodeList) * (size_t)nc);
+            Node **guards = arena_alloc(P->arena, sizeof(Node *) * (size_t)nc);
+            if (cap) {
+                memcpy(types, s->catch_types, sizeof(char *) * (size_t)cap);
+                memcpy(names, s->catch_names, sizeof(char *) * (size_t)cap);
+                memcpy(pats, s->patterns, sizeof(NodeList) * (size_t)cap);
+                memcpy(bodies, s->catches, sizeof(NodeList) * (size_t)cap);
+                memcpy(guards, s->guards, sizeof(Node *) * (size_t)cap);
+            }
+            s->catch_types = types;
+            s->catch_names = names;
+            s->patterns = pats;
+            s->catches = bodies;
+            s->guards = guards;
+            cap = nc;
+        }
+        int i = s->ncatches++;
+        s->catch_types[i] = b.type;
+        s->catch_names[i] = b.name;
+        memset(&s->patterns[i], 0, sizeof(NodeList));
+        memset(&s->catches[i], 0, sizeof(NodeList));
+        if (!b.type) {
+            P->no_ternary = true;
+            do {
+                nl_push(P->arena, &s->patterns[i], expression(P, 0));
+            } while (accept(P, ","));
+            P->no_ternary = false;
+        }
+        s->guards[i] = accept(P, "if") ? expression(P, 0) : NULL;
+        if (arrows && ptext(P, 0, "do"))
+            pfail(P, "a match expression's cases are 'case pattern => value'; use a match statement for 'do' blocks%s", "");
+        match_body(P, &s->catches[i], arrows);
+        P->match_arrows = arrows;
+    }
+    if (accept(P, "else")) {
+        s->has_else = true;
+        if (arrows && ptext(P, 0, "do"))
+            pfail(P, "a match expression ends with 'else => value'%s", "");
+        match_body(P, &s->other, arrows);
+    }
+    if (s->ncatches == 0 && !s->has_else)
+        pfail_at(P, s->line, s->col, "match requires at least one case%s", "");
+    expect(P, "end");
+}
+/* `match subject` ... `end` as an expression: the cases run in a function of no arguments that
+ * is called on the spot, so the value of the chosen case is its return value. */
+static Node *match_expression(Parser *P) {
+    Token *t = expect(P, "match");
+    if (P->nbody == P->capbody) {
+        P->capbody = GROW_CAP(P->capbody);
+        int *nd = arena_alloc(P->arena, sizeof(int) * (size_t)P->capbody);
+        if (P->nbody)
+            memcpy(nd, P->body_depths, sizeof(int) * (size_t)P->nbody);
+        P->body_depths = nd;
+    }
+    P->body_depths[P->nbody++] = t->depth;
+    FuncDecl *f = arena_alloc(P->arena, sizeof(FuncDecl));
+    f->line = t->line;
+    f->name = "lambda";
+    Node *m = tnode(P, S_MATCH, NULL, t);
+    m->expr = expression(P, 0);
+    if (peek(P, 0)->kind == T_NL)
+        finish(P); /* the cases may follow on the same line */
+    bool outer = P->match_arrows;
+    match_cases(P, m, true);
+    P->match_arrows = outer;
+    nl_push(P->arena, &f->body, m);
+    P->nbody--;
+    Node *e = tnode(P, N_MATCH, "", t);
     e->fn = f;
     return e;
 }

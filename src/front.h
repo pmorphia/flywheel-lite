@@ -68,6 +68,7 @@ typedef enum {
     N_THIS,    /* the receiver (`this`; `this.name` parses as N_INST) */
     N_TERNARY, /* `x if c else y`: args are c, x, y */
     N_SPAWN,   /* `spawn call`: fn is a no-parameter lambda running the call */
+    N_MATCH,   /* match expression: fn is a no-parameter lambda whose body is the match */
     /* statements */
     S_EXPR,
     S_DECLARE,
@@ -232,6 +233,7 @@ typedef struct {
     int which_depth; /* inside a `which` condition: `.name` and a leading operator use the item */
     NodeList pending;
     bool no_ternary; /* case patterns: `if` starts the guard */
+    bool match_arrows; /* the cases being parsed are a match expression's: `case p => value` */
     jmp_buf *jmp;
     CompileError *err;
     int line_offset;

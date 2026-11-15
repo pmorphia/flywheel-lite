@@ -1152,6 +1152,10 @@ static void compile_expr(Compiler *C, Node *e) {
         compile_lambda(C, e);
         emit(C, OP_SPAWN);
         break;
+    case N_MATCH: /* a function of no arguments holding the match, called on the spot */
+        compile_lambda(C, e);
+        emit2(C, OP_CALL, 0);
+        break;
     case N_CALL:
         compile_call(C, e);
         break;
