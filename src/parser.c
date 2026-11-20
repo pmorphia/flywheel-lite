@@ -188,6 +188,39 @@ static Node *node(Parser *P, NodeKind kind, const char *text, int line, int col)
 static Node *tnode(Parser *P, NodeKind kind, const char *text, const Token *t) {
     return node(P, kind, text, t->line, t->col);
 }
+/* The node's source range: from (line, col) to the end of the last token taken. */
+static void span_from(Parser *P, Node *n, int line, int col) {
+    if (!n || P->pos <= 0)
+        return;
+    const Token *last = &P->tokens[P->pos - 1];
+    if (last->kind == T_NL || last->kind == T_EOF || !last->end_line)
+        return;
+    n->sline = line;
+    n->scol = col;
+    n->eline = last->end_line;
+    n->ecol = last->end_col;
+}
+static void span_after(Parser *P, Node *n, const Node *first) {
+    if (first && first->eline)
+        span_from(P, n, first->sline, first->scol);
+    else if (first)
+        span_from(P, n, first->line, first->col);
+}
+/* Interpolated expressions are parsed from the string's text: their columns count from it. */
+static void shift_columns(Node *n, int line, int delta) {
+    if (!n || !delta)
+        return;
+    if (n->line == line)
+        n->col += delta;
+    if (n->sline == line)
+        n->scol += delta;
+    if (n->eline == line)
+        n->ecol += delta;
+    for (int i = 0; i < n->args.count; i++)
+        shift_columns(n->args.items[i], line, delta);
+    shift_columns(n->expr, line, delta);
+    shift_columns(n->target, line, delta);
+}
 
 /* Speculative parsing: run fn; on a parse error restore the position and return false. */
 typedef void (*SpecFn)(Parser *P, void *ctx);
@@ -524,7 +557,15 @@ static Node *string_expr(Parser *P, const char *s, size_t n, int line, int col) 
                     break;
                 }
             }
+            /* the interpolation's column in the source: string literals keep their raw text */
+            int icol = col + 1 + (int)(inner - s);
+            for (const char *q = inner; q > s; q--)
+                if (q[-1] == '\n') {
+                    icol = 1 + (int)(inner - q);
+                    break;
+                }
             Node *value = parse_sub_expression(P, inner, ilen, line_here, col, "interpolation");
+            shift_columns(value, line_here, icol - 1);
             if (spec || ilen < full) {
                 Node *f = node(P, N_FORMAT, spec ? spec : "", line, col);
                 nl_push(P->arena, &f->args, value);
@@ -828,7 +869,16 @@ static Node *spawn(Parser *P);
 static Node *match_expression(Parser *P);
 static void match_cases(Parser *P, Node *s, bool arrows);
 
+static Node *prefix_inner(Parser *P);
 static Node *prefix(Parser *P) {
+    Token *t = peek(P, 0);
+    int line = t->line, col = t->col;
+    Node *e = prefix_inner(P);
+    if (e && !e->eline)
+        span_from(P, e, line, col);
+    return e;
+}
+static Node *prefix_inner(Parser *P) {
     Token *t = peek(P, 0);
     Node *e = NULL;
     if (t->kind == T_MARKUP) {
@@ -888,6 +938,7 @@ static Node *prefix(Parser *P) {
     } else if (accept(P, "-") || accept(P, "+") || accept(P, "not")) {
         e = tnode(P, N_UNARY, tstr(P, t), t);
         nl_push(P->arena, &e->args, expression(P, tis(t, "not") ? 2 : 9));
+        span_from(P, e, t->line, t->col);
         return e;
     } else if (accept(P, "(")) {
         e = expression(P, 0);
@@ -980,12 +1031,15 @@ static Node *prefix(Parser *P) {
                  t->kind == T_NL ? "newline" : t->kind == T_EOF ? "end of file" : t->text);
         pfail_at(P, t->line, t->col, "expected expression, got '%s'", got);
     }
+    if (e && !e->eline)
+        span_from(P, e, t->line, t->col);
     for (;;) {
         if (accept(P, ".")) {
             Token *m = identifier(P);
             Node *n = tnode(P, N_MEMBER, with_type_args(P, m, false), m);
             nl_push(P->arena, &n->args, e);
             e = n;
+            span_from(P, e, t->line, t->col);
         } else if (accept(P, "(")) {
             Node *n = tnode(P, N_CALL, "", t);
             nl_push(P->arena, &n->args, e);
@@ -996,12 +1050,14 @@ static Node *prefix(Parser *P) {
                 expect(P, ")");
             }
             e = n;
+            span_from(P, e, t->line, t->col);
         } else if (accept(P, "[")) {
             Node *n = tnode(P, N_INDEX, "", t);
             nl_push(P->arena, &n->args, e);
             nl_push(P->arena, &n->args, expression(P, 0));
             expect(P, "]");
             e = n;
+            span_from(P, e, t->line, t->col);
         } else
             break;
     }
@@ -1038,6 +1094,7 @@ static Node *which(Parser *P, Node *seq) {
     Node *call = tnode(P, N_CALL, "", t);
     nl_push(P->arena, &call->args, m);
     nl_push(P->arena, &call->args, fn);
+    span_after(P, call, seq);
     return call;
 }
 static Node *expression(Parser *P, int level) {
@@ -1057,6 +1114,7 @@ static Node *expression(Parser *P, int level) {
         nl_push(P->arena, &n->args, c);
         nl_push(P->arena, &n->args, e);
         nl_push(P->arena, &n->args, expression(P, 0));
+        span_after(P, n, e);
         e = n;
     }
     return e;
@@ -1072,6 +1130,7 @@ static Node *operators(Parser *P, Node *e, int level) {
             take(P);
             Node *n = tnode(P, tis(op, "is") ? N_IS : N_AS, parse_type(P), op);
             nl_push(P->arena, &n->args, e);
+            span_after(P, n, e);
             e = n;
             continue;
         }
@@ -1091,6 +1150,7 @@ static Node *operators(Parser *P, Node *e, int level) {
                     pfail_at(P, op->line, op->col, "comparison chain is too long%s", "");
                 e->names[e->nnames++] = ops;
                 nl_push(P->arena, &e->args, expression(P, prec));
+                span_after(P, e, e);
                 continue;
             }
         }
@@ -1098,6 +1158,7 @@ static Node *operators(Parser *P, Node *e, int level) {
         Node *n = tnode(P, N_BINARY, !strcmp(ops, "otherwise") ? "??" : ops, op);
         nl_push(P->arena, &n->args, e);
         nl_push(P->arena, &n->args, expression(P, prec));
+        span_after(P, n, e);
         e = n;
     }
     return e;
@@ -1403,7 +1464,30 @@ static bool alias_declaration(Parser *P) {
         pfail(P, "negated aliases (name/negated) are only for bool, such as bool enabled/disabled = true%s", "");
     return true;
 }
+static Node *statement_inner(Parser *P);
 static Node *statement(Parser *P) {
+    Token *t = peek(P, 0);
+    int line = t->line, col = t->col, start = P->pos;
+    Node *s = statement_inner(P);
+    /* a statement's range ends with its first line (a block's header) */
+    if (s && !s->eline) {
+        int last = start;
+        for (int i = start; i < P->pos && i < P->ntokens; i++) {
+            if (P->tokens[i].kind == T_NL && P->tokens[i].line >= line)
+                break;
+            last = i;
+        }
+        const Token *e = &P->tokens[last];
+        if (e->kind != T_NL && e->kind != T_EOF && e->end_line) {
+            s->sline = line;
+            s->scol = col;
+            s->eline = e->end_line;
+            s->ecol = e->end_col;
+        }
+    }
+    return s;
+}
+static Node *statement_inner(Parser *P) {
     Token *st = peek(P, 0);
     Node *s = tnode(P, S_EXPR, NULL, st);
     if (accept(P, "throw")) {

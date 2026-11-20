@@ -1,0 +1,13 @@
+function divide(int a, int b) returns int
+    return a // b
+end
+
+function total(int[] xs) returns int
+    int sum = 0
+    for x in xs do
+        sum += divide(100, x)
+    end
+    return sum
+end
+
+print total([1, 2, 0])

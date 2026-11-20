@@ -431,18 +431,33 @@ void module_set_value(VM *vm, ObjModule *m, const char *name, Value v) {
 void chunk_init(Chunk *c) {
     c->code = NULL;
     c->lines = NULL;
+    c->spans = NULL;
+    c->span_table = NULL;
+    c->nspan = c->capspan = 0;
     c->count = c->cap = 0;
     va_init(&c->constants);
 }
-void chunk_write(VM *vm, Chunk *c, uint8_t byte, int line) {
+void chunk_write(VM *vm, Chunk *c, uint8_t byte, const SrcSpan *at) {
     if (c->count == c->cap) {
         int nc = GROW_CAP(c->cap);
         c->code = tb_realloc(vm, c->code, (size_t)c->cap, (size_t)nc);
         c->lines = tb_realloc(vm, c->lines, sizeof(int) * (size_t)c->cap, sizeof(int) * (size_t)nc);
+        c->spans = tb_realloc(vm, c->spans, sizeof(int) * (size_t)c->cap, sizeof(int) * (size_t)nc);
         c->cap = nc;
     }
+    /* consecutive instructions of one expression share a span */
+    if (!c->nspan || memcmp(&c->span_table[c->nspan - 1], at, sizeof *at) != 0) {
+        if (c->nspan == c->capspan) {
+            int nc = GROW_CAP(c->capspan);
+            c->span_table = tb_realloc(vm, c->span_table, sizeof(SrcSpan) * (size_t)c->capspan,
+                                       sizeof(SrcSpan) * (size_t)nc);
+            c->capspan = nc;
+        }
+        c->span_table[c->nspan++] = *at;
+    }
     c->code[c->count] = byte;
-    c->lines[c->count] = line;
+    c->lines[c->count] = at->line;
+    c->spans[c->count] = c->nspan - 1;
     c->count++;
 }
 int chunk_add_const(VM *vm, Chunk *c, Value v) {
@@ -700,6 +715,8 @@ static void free_obj(VM *vm, Obj *o) {
         ObjFunction *f = (ObjFunction *)o;
         tb_realloc(vm, f->chunk.code, (size_t)f->chunk.cap, 0);
         TB_FREE(vm, int, f->chunk.lines, f->chunk.cap);
+        TB_FREE(vm, int, f->chunk.spans, f->chunk.cap);
+        TB_FREE(vm, SrcSpan, f->chunk.span_table, f->chunk.capspan);
         va_free(vm, &f->chunk.constants);
         TB_FREE(vm, InlineCache, f->caches, f->ncaches);
         tb_realloc(vm, o, sizeof(ObjFunction), 0);

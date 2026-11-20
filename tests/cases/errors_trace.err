@@ -1,0 +1,10 @@
+Flywheel runtime error: NumericError: integer division by zero
+  at errors_trace.fw:2:14 in divide
+     2 | return a // b
+       |        ~~^^~~
+  at errors_trace.fw:8:16 in total
+     8 | sum += divide(100, x)
+       |        ^^^^^^^^^^^^^^
+  at errors_trace.fw:13:7 in <module>
+    13 | print total([1, 2, 0])
+       |       ^^^^^^^^^^^^^^^^

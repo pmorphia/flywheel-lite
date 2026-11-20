@@ -67,6 +67,7 @@ The command line follows the Flywheel compiler's:
 | `flywheel-lite disasm SOURCE` | print the compiled bytecode |
 | `flywheel-lite repl` | interactive session; a trailing expression's value is printed |
 | `flywheel-lite selftest` | run this checkout's test suite (needs Python 3) |
+| `flywheel-lite --error SOURCE` / `-E SOURCE` | print the last error SOURCE stopped with: its message and locations, without the source lines |
 
 `fwl` is a short alias for `flywheel-lite` (`fwl hello.fw`, `fwl repl`); `make install` and
 `cmake --install` create it next to the executable.
@@ -82,9 +83,30 @@ input. `-s CODE`, `--source CODE`, or
 accepted and ignored, so compiler command lines work unchanged. `build`, `desktop`, `serve`,
 `format` (`fmt`), `doc`, `lsp`, and `test --coverage`/`--race` need the Flywheel compiler and say so.
 
-Errors use the compiler's formats: `file:line:col: error: ...` for compile errors and
-`Flywheel runtime error: Type: message` (plus the failing location) for uncaught errors, with exit
-status 1. Set `LITE_TRACE=1` for a full stack trace.
+Errors use the compiler's formats, with exit status 1: `file:line:col: error: ...` for compile
+errors, and `Flywheel runtime error: Type: message` followed by a traceback for uncaught errors.
+Each location shows its source line with the failing range marked: `^` under the operator, call,
+or member that failed and `~` under the rest of its expression. Recursion is folded ("the same
+call 197 more times"). Output is colored when standard error is a terminal; `NO_COLOR=1` turns
+color off and `FORCE_COLOR=1` turns it on.
+
+```
+Flywheel runtime error: NumericError: integer division by zero
+  at main.fw:2:14 in divide
+    2 | return a // b
+      |        ~~^^~~
+  at main.fw:8:18 in compute
+    8 | total += divide(100, x)
+      |          ^^^^^^^^^^^^^^
+  at main.fw:13:7 in <module>
+   13 | print compute([1, 2, 0])
+      |       ^^^^^^^^^^^^^^^^^^
+```
+
+The last error of each source file is kept in `$XDG_STATE_HOME/flywheel-lite/errors` (by default
+`~/.local/state`; `%LOCALAPPDATA%` on Windows), so `fwl -E main.fw` prints it again later, with
+the time it happened, for example after a program cleared the terminal. The record holds the
+message and locations only, never the source. `-s` code and standard input are not recorded.
 
 ## What runs
 
@@ -184,4 +206,5 @@ starting quickly and running anywhere.
 | `src/vm.c` | the interpreter loop, calls, errors, classes, coercion, module loading |
 | `src/value.c`, `src/memory.c` | values, maps, formatting, the garbage collector |
 | `src/lib_*.c` | builtins and library modules |
+| `src/diag.c` | tracebacks, compile error excerpts, color, the last-error record (`--error`) |
 | `src/main.c` | the command-line tool |

@@ -179,9 +179,19 @@ typedef struct {
     Entry *entries;
 } Table;
 
+/* Where an instruction comes from: the node's own position (line, col: an operator, a callee, a
+ * member name) and the source range of the whole expression or statement (sline:scol up to, not
+ * including, eline:ecol). Columns count bytes from 1; eline is 0 when only the position is known. */
+typedef struct {
+    int line, col, sline, scol, eline, ecol;
+} SrcSpan;
+
 typedef struct {
     uint8_t *code;
     int *lines;
+    int *spans; /* per byte: an index into span_table */
+    SrcSpan *span_table;
+    int nspan, capspan;
     int count, cap;
     ValueArray constants;
 } Chunk;
@@ -457,8 +467,10 @@ struct VM {
     const char *exe_dir;
     Value desc_args[8];
     Table type_methods[16];
-    char trace[4096];
+    struct DiagReport *report; /* the last error's traceback (diag.c), recorded where it was thrown */
     Obj *traced;
+    const char *main_source; /* the main program's text, for excerpts of <source> and <stdin> */
+    size_t main_source_len;
     Value empty_fragment;
     bool gc_stress;
 };
@@ -559,7 +571,7 @@ void module_set_native(VM *vm, ObjModule *m, const char *name, NativeFn fn, int 
 void module_set_value(VM *vm, ObjModule *m, const char *name, Value v);
 
 void chunk_init(Chunk *c);
-void chunk_write(VM *vm, Chunk *c, uint8_t byte, int line);
+void chunk_write(VM *vm, Chunk *c, uint8_t byte, const SrcSpan *at);
 int chunk_add_const(VM *vm, Chunk *c, Value v);
 
 /* ---------------------------------------------------------------- value.c */
@@ -611,6 +623,7 @@ typedef struct {
     const char *text;
     int len;
     int line, col;
+    int end_line, end_col; /* just past the token's last byte */
     int depth;
     bool spaced;
 } Token;
@@ -673,6 +686,40 @@ ObjString *error_message(VM *vm, Value err);
 void vm_report_error(VM *vm, Value err);
 Value vm_resolve_named(VM *vm, ObjTypeDesc *t);
 void vm_print_trace(VM *vm);
+
+/* ---------------------------------------------------------------- diag.c */
+
+/* Tracebacks and compile errors: colored when stderr is a terminal (NO_COLOR turns it off,
+ * FORCE_COLOR on), with the source lines and the columns that failed. */
+#define DIAG_FRAMES 64
+typedef struct {
+    char file[512];
+    char fn[128];
+    SrcSpan at;
+} DiagFrame;
+typedef struct DiagReport {
+    bool compile; /* a compile error (one location, no function) rather than a runtime error */
+    bool bare;    /* runtime: `throw BadInput` without a message prints only the type */
+    char type[128];
+    char *message; /* malloc'd */
+    DiagFrame frames[DIAG_FRAMES]; /* innermost first */
+    int nframes;
+    int omitted, omitted_at; /* frames left out before frames[omitted_at] (deep recursion) */
+} DiagReport;
+DiagReport *diag_new(void);
+void diag_reset(DiagReport *r);
+void diag_set_message(DiagReport *r, const char *message);
+bool diag_color(void);
+/* Prints the report to stderr; `source` adds the source excerpt under each location. Sources are
+ * read from disk, except `main_name` (<source>, <stdin>), whose text is main_src. */
+void diag_print(const DiagReport *r, bool source, const char *main_name, const char *main_src, size_t main_len);
+/* A compile error at path:line:col, printed with its excerpt. */
+void diag_compile_error(DiagReport *r, const char *path, int line, int col, const char *message,
+                        const char *src, size_t len);
+/* `flywheel-lite --error FILE`: the last error of FILE is kept (without source) in the user's
+ * state directory; diag_record writes it and diag_show_last prints it. */
+void diag_record(const char *source_path, const DiagReport *r);
+int diag_show_last(const char *source_path);
 
 /* ---------------------------------------------------------------- libraries */
 

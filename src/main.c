@@ -55,6 +55,8 @@ static void usage(FILE *f) {
           "           print the compiled bytecode\n"
           "       flywheel-lite update|u [curl arguments]\n"
           "           reinstall from flywheel.polymorphia.dev\n"
+          "       flywheel-lite --error|-E SOURCE\n"
+          "           print the last error SOURCE stopped with (locations only, no source)\n"
           "       flywheel-lite repl | selftest\n"
           "       flywheel-lite help|h|--help | version|v|--version\n"
           "\n"
@@ -289,7 +291,10 @@ static int compile_only(VM *vm, const char *path, const char *src, size_t len, b
     memset(&err, 0, sizeof err);
     ObjFunction *fn = compile_module(vm, m, src, len, path, &err);
     if (!fn) {
-        fprintf(stderr, "%s:%d:%d: error: %s\n", path, err.line, err.col ? err.col : 1, err.message);
+        if (!vm->report)
+            vm->report = diag_new();
+        diag_compile_error(vm->report, path, err.line, err.col, err.message, src, len);
+        diag_record(path, vm->report);
         return 1;
     }
     if (disasm)
@@ -629,6 +634,22 @@ int main(int argc, char **argv) {
         usage(stdout);
         return 0;
     }
+    if (!strcmp(cmd, "--error") || !strcmp(cmd, "-E") || !strncmp(cmd, "--error=", 8)) {
+        const char *file = !strncmp(cmd, "--error=", 8) ? cmd + 8 : argc > 2 ? argv[2] : NULL;
+        if (!file || !*file) {
+            fputs("flywheel-lite: --error needs a source file: flywheel-lite --error main.fw\n", stderr);
+            return 2;
+        }
+        struct stat dst;
+        if (stat(file, &dst) == 0 && (dst.st_mode & S_IFMT) == S_IFDIR) {
+            size_t n = strlen(file);
+            char *entry = xmalloc(n + sizeof "/source.fw");
+            memcpy(entry, file, n);
+            strcpy(entry + n, n && (file[n - 1] == '/' || file[n - 1] == '\\') ? "source.fw" : "/source.fw");
+            file = entry;
+        }
+        return diag_show_last(file);
+    }
     static const char *compiler_only[] = {"build", "desktop", "serve", "format", "doc", "lsp"};
     for (size_t i = 0; i < sizeof compiler_only / sizeof *compiler_only; i++)
         if (!strcmp(cmd, compiler_only[i])) {
@@ -855,11 +876,15 @@ int main(int argc, char **argv) {
     Value result = val_null();
     RunResult r = vm_run_main(vm, path, source, len, &result);
     fflush(stdout);
+    if (r == RUN_ERROR && vm->report && !code && strcmp(path, "<stdin>") != 0)
+        diag_record(path, vm->report);
     if (r == RUN_OK && (mode == DEBUG || mode == EXPORT)) {
         Buf b;
         buf_init(&b);
         if (!value_to_buf(vm, result, &b, false, 0)) {
             vm_report_error(vm, vm->error);
+            if (!code && strcmp(path, "<stdin>") != 0)
+                diag_record(path, vm->report);
             return 1;
         }
         if (mode == DEBUG) {

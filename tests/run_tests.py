@@ -18,6 +18,10 @@ import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+# Diagnostics are compared without color, and last-error records (--error) stay out of $HOME.
+for name in ("FORCE_COLOR", "CLICOLOR_FORCE"):
+    os.environ.pop(name, None)
+os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp(prefix="flywheel-lite-state-")
 REPO = Path(os.environ.get("FLYWHEEL_DIR") or HERE.parent.parent).resolve()
 UNSUPPORTED = {"web", "net", "thread", "sqlite", "regex", "desktop", "crypto", "compress",
                "toml", "yaml", "flywheel"}
@@ -201,6 +205,22 @@ def main():
                     ok = ok and r.stderr.startswith("<source>:1:")
                 check(name, ok, f"exit {r.returncode} (want {code})\n--- expected\n{expected}--- got\n"
                                 f"{r.stdout}--- stderr\n{r.stderr}")
+
+        # --error: the last error of a file, with its locations and without source lines
+        name = "cli/last_error"
+        if not pattern or pattern in name:
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                (tmp / "boom.fw").write_text("function f(int n) returns int\n    return 10 // n\nend\nprint f(0)\n",
+                                             encoding="utf-8")
+                none = cli("--error", "boom.fw", cwd=tmp)
+                ran = cli("boom.fw", cwd=tmp)
+                last = cli("-E", "boom.fw", cwd=tmp)
+                ok = (none.returncode == 1 and ran.returncode == 1 and last.returncode == 0 and
+                      "Flywheel runtime error: NumericError: integer division by zero\n"
+                      "  at boom.fw:2:15 in f\n  at boom.fw:4:7 in <module>\n" in last.stderr and
+                      "return" not in last.stderr and "return 10 // n" in ran.stderr)
+                check(name, ok, f"--- before\n{none.stderr}--- run\n{ran.stderr}--- --error\n{last.stderr}")
 
     known = load_known()
     regressions = 0

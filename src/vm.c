@@ -17,25 +17,43 @@ static RunResult run(VM *vm, int base);
 
 /* ---------------------------------------------------------------- errors */
 
+static void frame_at(VM *vm, int i, DiagFrame *out) {
+    CallFrame *f = &vm->frames[i];
+    ObjFunction *fn = f->closure->fn;
+    Chunk *c = &fn->chunk;
+    size_t off = f->ip > c->code ? (size_t)(f->ip - c->code - 1) : 0;
+    if (c->count && off >= (size_t)c->count)
+        off = (size_t)c->count - 1;
+    if (c->count && c->spans)
+        out->at = c->span_table[c->spans[off]];
+    else
+        out->at = (SrcSpan){c->count ? c->lines[off] : 0, 0, 0, 0, 0, 0};
+    snprintf(out->file, sizeof out->file, "%s", fn->module && fn->module->path ? fn->module->path->chars : "<input>");
+    const char *name = fn->name ? fn->name->chars : "?";
+    /* methods by class: Account.withdraw, Account.constructor */
+    if (fn->owner && fn->owner->name && strcmp(name, "lambda") != 0 && name[0] != '$')
+        snprintf(out->fn, sizeof out->fn, "%s.%s", fn->owner->name->chars, !strcmp(name, "init") ? "constructor" : name);
+    else
+        snprintf(out->fn, sizeof out->fn, "%s", name);
+}
+/* The call stack where an error is thrown, innermost first. A deep stack keeps its innermost
+ * and outermost frames. */
 static void record_trace(VM *vm) {
-    Buf b;
-    buf_init(&b);
-    int shown = 0;
-    for (int i = vm->frame_count - 1; i >= 0 && shown < 12; i--, shown++) {
-        CallFrame *f = &vm->frames[i];
-        ObjFunction *fn = f->closure->fn;
-        size_t off = f->ip > fn->chunk.code ? (size_t)(f->ip - fn->chunk.code - 1) : 0;
-        int line = fn->chunk.count ? fn->chunk.lines[off < (size_t)fn->chunk.count ? off : (size_t)fn->chunk.count - 1] : 0;
-        const char *file = fn->module && fn->module->path ? fn->module->path->chars : "<input>";
-        buf_printf(&b, "  at %s:%d in %s\n", file, line, fn->name ? fn->name->chars : "?");
+    if (!vm->report)
+        vm->report = diag_new();
+    DiagReport *r = vm->report;
+    diag_reset(r);
+    int n = vm->frame_count, inner = DIAG_FRAMES - 16;
+    for (int i = n - 1; i >= 0; i--) {
+        int depth = n - 1 - i; /* 0 = innermost */
+        if (n > DIAG_FRAMES && depth >= inner && i >= 16) {
+            if (!r->omitted)
+                r->omitted_at = r->nframes;
+            r->omitted++;
+            continue;
+        }
+        frame_at(vm, i, &r->frames[r->nframes++]);
     }
-    if (vm->frame_count > 12)
-        buf_printf(&b, "  ... %d more\n", vm->frame_count - 12);
-    size_t n = b.len < sizeof vm->trace - 1 ? b.len : sizeof vm->trace - 1;
-    if (b.data)
-        memcpy(vm->trace, b.data, n);
-    vm->trace[n] = 0;
-    buf_free(&b);
 }
 
 bool vm_throw_value(VM *vm, Value v) {
@@ -98,18 +116,16 @@ void vm_report_error(VM *vm, Value err) {
     push_root(vm, val_obj(t));
     ObjString *m = error_message(vm, err);
     Value idx;
-    if (!m->len && IS_OBJT(err, OBJ_INSTANCE) && table_get(&AS_INSTANCE(err)->klass->field_index, vm->s_message, &idx))
-        fprintf(stderr, "Flywheel runtime error: %s\n", t->chars); /* `throw BadInput` without a message */
-    else
-        fprintf(stderr, "Flywheel runtime error: %s: %s\n", t->chars, m->len ? m->chars : "exception");
+    if (!vm->report)
+        vm->report = diag_new();
+    DiagReport *r = vm->report;
+    r->compile = false;
+    /* `throw BadInput` without a message prints only the type */
+    r->bare = !m->len && IS_OBJT(err, OBJ_INSTANCE) && table_get(&AS_INSTANCE(err)->klass->field_index, vm->s_message, &idx);
+    snprintf(r->type, sizeof r->type, "%s", t->chars);
+    diag_set_message(r, m->len ? m->chars : "exception");
     pop_root(vm, 1);
-    if (vm->trace[0] && getenv("LITE_TRACE") && strcmp(getenv("LITE_TRACE"), "0") != 0)
-        fputs(vm->trace, stderr);
-    else if (vm->trace[0]) {
-        /* the innermost location only */
-        const char *nl = strchr(vm->trace, '\n');
-        fprintf(stderr, "%.*s\n", nl ? (int)(nl - vm->trace) : (int)strlen(vm->trace), vm->trace);
-    }
+    diag_print(r, true, vm->main_path, vm->main_source, vm->main_source_len);
 }
 
 static bool error_matches(VM *vm, Value err, ObjString *name) {
@@ -3883,17 +3899,24 @@ void vm_free(VM *vm) {
     free(vm->stack);
 }
 
-void vm_print_trace(VM *vm) { fputs(vm->trace, stderr); }
+void vm_print_trace(VM *vm) {
+    if (vm->report)
+        diag_print(vm->report, true, vm->main_path, vm->main_source, vm->main_source_len);
+}
 
 RunResult vm_run_main(VM *vm, const char *path, const char *source, size_t len, Value *result) {
     vm->main_path = path;
+    vm->main_source = source;
+    vm->main_source_len = len;
     CompileError err;
     memset(&err, 0, sizeof err);
     ObjModule *m = compile_file_module(vm, str_intern_c(vm, "main"), path, source, len, &err);
     if (!m) {
         fflush(stdout);
-        fprintf(stderr, "%s:%d:%d: error: %s\n", err.file && err.file[0] != '<' ? path : (err.file ? err.file : path),
-                err.line, err.col ? err.col : 1, err.message);
+        if (!vm->report)
+            vm->report = diag_new();
+        diag_compile_error(vm->report, err.file && err.file[0] != '<' ? path : (err.file ? err.file : path), err.line,
+                           err.col, err.message, source, len);
         return RUN_ERROR;
     }
     m->initialized = true;

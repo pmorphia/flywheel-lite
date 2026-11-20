@@ -293,6 +293,8 @@ static void emit(Lexer *L, TokKind kind, const char *text, size_t len, size_t en
     t->depth = L->group;
     t->spaced = L->p == 0 || is_space(L->src[L->p - 1]);
     advance(L, end);
+    t->end_line = L->line;
+    t->end_col = L->col;
 }
 static bool tok_is(const Token *t, const char *s) {
     return (size_t)t->len == strlen(s) && memcmp(t->text, s, (size_t)t->len) == 0;

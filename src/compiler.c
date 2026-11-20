@@ -79,6 +79,7 @@ typedef struct {
     int nglobal_types;
     bool *global_const;
     int line, col;
+    const Node *at; /* the expression or statement being compiled: its range is the span */
     const char *unit_hint; /* declared type of the declaration being compiled, for 100m literals */
     /* modules whose unit namespaces this module sees: its imports, and _time behind `import time` */
     ObjModule **unit_modules;
@@ -101,7 +102,17 @@ TB_NORETURN static void cfail(Compiler *C, int line, const char *fmt, ...) {
 /* ---------------------------------------------------------------- emission */
 
 static Chunk *chunk(Compiler *C) { return &C->fs->fn->chunk; }
-static void emit(Compiler *C, uint8_t b) { chunk_write(C->vm, chunk(C), b, C->line); }
+static void emit(Compiler *C, uint8_t b) {
+    SrcSpan at = {C->line, C->col, 0, 0, 0, 0};
+    const Node *n = C->at;
+    if (n && n->line == C->line && n->eline) {
+        at.sline = n->sline;
+        at.scol = n->scol;
+        at.eline = n->eline;
+        at.ecol = n->ecol;
+    }
+    chunk_write(C->vm, chunk(C), b, &at);
+}
 static void emit2(Compiler *C, uint8_t a, uint8_t b) {
     emit(C, a);
     emit(C, b);
@@ -1048,8 +1059,10 @@ static const char *conversion_unit(Compiler *C, Node *target) {
 
 static void compile_expr(Compiler *C, Node *e) {
     int saved_line = C->line, saved_col = C->col;
+    const Node *saved_at = C->at;
     C->line = e->line;
     C->col = e->col;
+    C->at = e;
     switch (e->kind) {
     case N_INT: {
         errno = 0;
@@ -1296,6 +1309,7 @@ static void compile_expr(Compiler *C, Node *e) {
     }
     C->line = saved_line;
     C->col = saved_col;
+    C->at = saved_at;
 }
 
 /* ---------------------------------------------------------------- try / exits */
@@ -1833,6 +1847,7 @@ static void compile_stmt(Compiler *C, Node *s) {
     FuncState *fs = C->fs;
     C->line = s->line;
     C->col = s->col;
+    C->at = s;
     switch (s->kind) {
     case S_EXPR: {
         Node *e = s->target;

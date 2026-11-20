@@ -110,6 +110,9 @@ typedef struct FuncDecl {
 struct Node {
     NodeKind kind;
     int line, col;
+    /* The source range the node covers: sline:scol up to (not including) eline:ecol; eline is 0
+     * when unknown. Tracebacks underline it. */
+    int sline, scol, eline, ecol;
     const char *text;   /* literal, name, operator, or type text */
     NodeList args;      /* expression operands / element attributes then children */
     const char **names; /* chain operators, element attribute names */
