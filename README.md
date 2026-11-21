@@ -138,6 +138,9 @@ and timeouts), `time`, `io`, `json` (parse, encode, typed `decode`, `Class.from_
 (rendering, `html.parse`, CSS selector queries, mutation, parent and sibling links).
 `deep_copy(value)` copies a whole object graph as in the compiler, and `random.Generator(seed)`
 produces the same numbers as the compiler's for the same seed.
+The built-in names (`__file__`, `__dir__`, `__line__`, `__args__`, `__version__`, `__flywheel__`,
+`__impl__`, `__os__`, `__arch__`) work as in the compiler; here `__impl__` is `"lite"`, `__version__`
+is Flywheel Lite's own version, and `__flywheel__` the Flywheel version it follows.
 
 Not available in Flywheel Lite (importing one reports it clearly; use the Flywheel compiler for these):
 `web`, `net`, `thread`, `sqlite`, `regex`, `desktop`, `crypto`, `compress`, `toml`, `yaml`,

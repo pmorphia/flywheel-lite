@@ -993,6 +993,8 @@ NATIVE(os_set_env) {
     *out = val_null();
     return true;
 }
+NATIVE(os_args);
+bool lite_os_args(VM *vm, int argc, Value *args, Value *out) { return os_args(vm, argc, args, out); }
 NATIVE(os_args) {
     (void)argc;
     (void)args;

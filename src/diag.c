@@ -120,7 +120,7 @@ static const char *shown_path(const char *path) {
     return path;
 }
 /* The absolute form of a path to an existing file, in out (or path itself). */
-static const char *absolute(const char *path, char *out, size_t size) {
+const char *diag_absolute(const char *path, char *out, size_t size) {
 #ifdef _WIN32
     if (_fullpath(out, path, size))
         return out;
@@ -443,7 +443,7 @@ static void make_dirs(char *path) {
 }
 /* <state dir>/flywheel-lite/errors/<hash of the absolute source path>.txt */
 static bool record_path(const char *source_path, char *out, size_t size, char *abs, size_t abs_size) {
-    absolute(source_path, abs, abs_size);
+    diag_absolute(source_path, abs, abs_size);
     uint64_t h = 1469598103934665603ULL;
     for (const unsigned char *p = (const unsigned char *)abs; *p; p++)
         h = (h ^ *p) * 1099511628211ULL;
@@ -516,7 +516,7 @@ void diag_record(const char *source_path, const DiagReport *r) {
     for (int i = 0; i < r->nframes; i++) {
         const DiagFrame *fr = &r->frames[i];
         char file[1024];
-        const char *shown = fr->file[0] == '<' ? fr->file : absolute(fr->file, file, sizeof file);
+        const char *shown = fr->file[0] == '<' ? fr->file : diag_absolute(fr->file, file, sizeof file);
         fprintf(f, "frame %d %d %d %d %d %d\t", fr->at.line, fr->at.col, fr->at.sline, fr->at.scol, fr->at.eline,
                 fr->at.ecol);
         put_field(f, "", shown);

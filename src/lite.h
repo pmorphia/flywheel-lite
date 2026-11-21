@@ -706,6 +706,10 @@ typedef struct DiagReport {
     int nframes;
     int omitted, omitted_at; /* frames left out before frames[omitted_at] (deep recursion) */
 } DiagReport;
+/* The absolute form of a path to an existing file, in out (or path itself). */
+const char *diag_absolute(const char *path, char *out, size_t size);
+/* os.args(), for the built-in __args__ (lib_modules.c) */
+bool lite_os_args(VM *vm, int argc, Value *args, Value *out);
 DiagReport *diag_new(void);
 void diag_reset(DiagReport *r);
 void diag_set_message(DiagReport *r, const char *message);

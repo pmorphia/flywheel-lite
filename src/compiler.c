@@ -4,6 +4,12 @@
 #include <ctype.h>
 #include <errno.h>
 #include <math.h>
+#ifdef _WIN32
+#include <direct.h>
+#define getcwd _getcwd
+#else
+#include <unistd.h>
+#endif
 
 #define MAX_LOCALS 256
 #define MAX_UPVALS 256
@@ -598,11 +604,91 @@ static void emit_get_resolved(Compiler *C, Resolved *r) {
         break;
     }
 }
+/* Built-in names (docs/language.md#built-in-names in Flywheel): facts about the program and the
+ * implementation running it, found after every declaration so a program's own name wins. All but
+ * __args__ are constants. */
+static bool compile_builtin_name(Compiler *C, const char *name, int line) {
+    size_t n = strlen(name);
+    if (n < 5 || strncmp(name, "__", 2) != 0 || strcmp(name + n - 2, "__") != 0)
+        return false;
+    const char *text = NULL;
+    char buf[4096];
+    const char *file = C->path ? C->path : "";
+    bool special = !file[0] || file[0] == '<' || strstr(file, "://");
+    if (!strcmp(name, "__file__"))
+        text = special ? file : diag_absolute(file, buf, sizeof buf);
+    else if (!strcmp(name, "__dir__")) {
+        if (special) {
+            if (!getcwd(buf, sizeof buf))
+                buf[0] = 0;
+        } else {
+            diag_absolute(file, buf, sizeof buf);
+            char *cut = NULL;
+            for (char *q = buf; *q; q++)
+                if (*q == '/' || *q == '\\')
+                    cut = q;
+            if (cut == buf)
+                cut[1] = 0; /* a file in / */
+            else if (cut)
+                *cut = 0;
+            else if (!getcwd(buf, sizeof buf))
+                buf[0] = 0;
+        }
+        text = buf;
+    } else if (!strcmp(name, "__line__")) {
+        emit_const(C, val_int(line));
+        return true;
+    } else if (!strcmp(name, "__args__")) {
+        emit_const(C, val_obj(new_native(C->vm, "os.args", lite_os_args, 0, 0)));
+        emit2(C, OP_CALL, 0);
+        return true;
+    } else if (!strcmp(name, "__version__")) {
+        static char version[32];
+        snprintf(version, sizeof version, "%s", LITE_VERSION);
+        char *space = strchr(version, ' ');
+        if (space)
+            *space = 0; /* "2.13 (beta-13)" -> "2.13" */
+        text = version;
+    } else if (!strcmp(name, "__flywheel__"))
+        text = LITE_LANGUAGE;
+    else if (!strcmp(name, "__impl__"))
+        text = "lite";
+    else if (!strcmp(name, "__os__"))
+#if defined(_WIN32)
+        text = "windows";
+#elif defined(__APPLE__)
+        text = "macos";
+#elif defined(__linux__)
+        text = "linux";
+#else
+        text = "unix";
+#endif
+    else if (!strcmp(name, "__arch__"))
+#if defined(__x86_64__) || defined(_M_X64)
+        text = "x86_64";
+#elif defined(__aarch64__) || defined(_M_ARM64)
+        text = "arm64";
+#elif defined(__i386__) || defined(_M_IX86)
+        text = "x86";
+#elif defined(__arm__) || defined(_M_ARM)
+        text = "arm";
+#elif defined(__riscv) && __riscv_xlen == 64
+        text = "riscv64";
+#else
+        text = "unknown";
+#endif
+    if (!text)
+        return false;
+    emit_const(C, val_obj(str_intern_c(C->vm, text)));
+    return true;
+}
 static void compile_name(Compiler *C, const char *raw, int line) {
     const char *name = strip_type_args(C, raw);
     if (!strcmp(name, "$this"))
         cfail(C, line, "'this' is only valid inside methods");
     Resolved r = resolve(C, name);
+    if (r.kind == R_NONE && compile_builtin_name(C, name, line))
+        return;
     if (r.kind == R_NONE) {
         if (strchr(raw, '<')) {
             /* generic builtin casts such as array<int> and map<string, int> */
