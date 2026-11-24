@@ -17,6 +17,11 @@ import sys
 import tempfile
 from pathlib import Path
 
+# On Windows the conformance suite reruns itself in UTF-8 mode (test_compiler.py), so give that
+# child the whole command line before load_suite takes the arguments away.
+if os.name == "nt" and not sys.flags.utf8_mode:
+    sys.exit(subprocess.call([sys.executable, "-X", "utf8", *sys.argv]))
+
 HERE = Path(__file__).resolve().parent
 # Diagnostics are compared without color, and last-error records (--error) stay out of $HOME.
 for name in ("FORCE_COLOR", "CLICOLOR_FORCE"):
