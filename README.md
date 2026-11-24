@@ -10,8 +10,7 @@ Flywheel Lite is currently in its **beta** phase: version **2.13 (beta-13)**, fo
 
 Why it exists:
 
-1. **macOS support.** Flywheel Lite is portable C11 with no platform toolchain requirements, so it runs
-   on macOS as well as Linux and Windows.
+1. **No C++ compiler required.** You can skip installing Visual Studio Build Tools and don't need administrator privileges.
 2. **Fewer dependencies, faster install.** Building needs only a C compiler: no LLVM, no C++20
    toolchain, no linker at run time, nothing downloaded. A clean build takes a few seconds.
 3. **Lightweight.** One ~0.5 MB executable that depends only on the C library; about 1 ms to start.
