@@ -1,0 +1,4 @@
+public import vecmath.*
+function origin() returns Vec2
+    return Vec2(0, 0)
+end

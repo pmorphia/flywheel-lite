@@ -49,7 +49,7 @@ Elsewhere, point at the Flywheel checkout with `make FLYWHEEL_DIR=/path/to/flywh
 through to `make test`), `cmake -DFLYWHEEL_DIR=/path/to/flywheel`, or the `FLYWHEEL_DIR`
 environment variable for `tests/run_tests.py`.
 
-The library modules written in Flywheel (`csv`, `url`, `log`, `args`, `bigint`, `decimal`, `random`, `metric`, `imperial`, `cogwheel`, and `_time`, the time units behind `import time`) are
+The library modules written in Flywheel (`csv`, `url`, `log`, `args`, `bigint`, `decimal`, `random`, `metric`, `imperial`, `cogwheel`, `vecmath`, and `_time`, the time units behind `import time`) are
 embedded into the executable from `$FLYWHEEL_DIR/stdlib/fw` at build time by a small helper (`tools/embed.c`),
 so the installed binary is self-contained. `make debug` builds with AddressSanitizer and UBSan.
 
@@ -119,7 +119,7 @@ protocol, enums and enums with data, `match` with every pattern form (values, ra
 members, types, `ok`/`error`, destructuring, guards), destructuring declarations, generics,
 nullable values, `try`/`catch`/`finally`, named errors, declared error types (`error Name(...)`,
 `throw Name with "message"`), `assert`, `defer`, `Result`, reactive variables (`reactive`, `when`,
-`computed`), one-call `run` bodies (`if x run f()`, `else run g()`, `for i in xs run f(i)`),
+`computed`), `struct` value types, one-call `run` bodies (`if x run f()`, `else run g()`, `for i in xs run f(i)`),
 negated bool aliases (`bool on/off`), units (`unitns name`, `unit`, `unitconv`, quantity
 literals such as `100m`, quantity types of any numeric type such as `u8[time]` and
 `float[metric.length]`, `x in cm`, `type`/`unit`/`unitns`, units shared across modules, `unitconv A = B`
@@ -129,11 +129,11 @@ components (also qualified by module, `<cogwheel.heading>`; including `void comp
 `<br>` with no closing tag), element families, void tags and components written without a closing
 tag (`<cogwheel.conf key="a" value="1">`), and local, path, package (every `.flywheel-modules` at
 or above the importing file, nearest first) and library-module
-imports with aliases, wildcards and `private`.
+imports with aliases, wildcards, `private`, and `public import name.*`.
 
 Native modules: `math`, `fs`, `os` (including `run`, `process`, `pipeline` with captured output
-and timeouts), `time`, `io`, `json` (parse, encode, typed `decode`, `Class.from_json`,
-`<json>` literals), `testing`, `collections`, `encoding`, `uuid`, `gc`, `hot` (`hot.reload()` and
+and timeouts, and background processes with `start`, `alive`, `wait`, and `kill`), `time`, `io`, `json` (parse, encode, typed `decode`, `Class.from_json`,
+`<json>` literals), `testing`, `collections`, `encoding`, `uuid`, `toml`, `gc`, `hot` (`hot.reload()` and
 `hot.enabled()` are always `false`: hot reload is the compiler's `--hot`), and `html`/`svg`
 (rendering, `html.parse`, CSS selector queries, mutation, parent and sibling links).
 `deep_copy(value)` copies a whole object graph as in the compiler, and `random.Generator(seed)`
@@ -143,9 +143,24 @@ The built-in names (`__file__`, `__dir__`, `__line__`, `__args__`, `__version__`
 is Flywheel Lite's own version, and `__flywheel__` the Flywheel version it follows.
 
 Not available in Flywheel Lite (importing one reports it clearly; use the Flywheel compiler for these):
-`web`, `net`, `thread`, `sqlite`, `regex`, `desktop`, `crypto`, `compress`, `toml`, `yaml`,
-`flywheel`, native `import c/cxx/rust/zig`, and URL imports. On Windows, `os.run`/`os.process`
-capture standard output only and ignore timeouts.
+`web`, `net`, `thread`, `sqlite`, `regex`, `desktop`, `crypto`, `compress`, `yaml`,
+`flywheel`, native `import rust/zig`, and URL imports. On Windows, `os.run`/`os.process`
+capture standard output only and ignore timeouts, and `os.start` and native imports are unavailable.
+
+## Native C and C++ imports
+
+`import c name` and `import cxx name` (`import++ name`) work on Linux and macOS, so packages with a C
+backend, such as Aperture, run. The first run builds the source with the system compiler (`cc`/`c++`,
+or `$CC`/`$CXX`) into `$XDG_CACHE_HOME/flywheel-lite/native` (by default `~/.cache`); it is rebuilt when
+the source, or a file it includes with quotes, changes. Programs without native imports still need no
+compiler. Numbers, `bool`, strings, pointers (as `int` handles), and arrays for pointer parameters
+cross as with the compiler, and the `// flywheel:` directives are followed. `check` only reads the
+source. Differences:
+
+- Functions that take or return C structs by value or take function pointers are not exposed.
+- Arrays are copied into a C block for the call (and back, unless the pointer is to `const`). An
+  array passed for a `void *` is laid out by its values: `double` for numbers with fractions, 64-bit
+  integers for `int`, and structs by their field types.
 
 ## Differences from the compiler
 

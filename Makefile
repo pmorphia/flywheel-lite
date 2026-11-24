@@ -13,10 +13,13 @@ BUILD   ?= build
 FLYWHEEL_DIR ?= ..
 STDLIB  ?= $(FLYWHEEL_DIR)/stdlib/fw
 
+# dlopen, for native C imports (part of libc on macOS and current glibc)
+LDLIBS  ?= $(if $(filter Linux,$(shell uname -s)),-ldl)
+
 WARN    := -Wall -Wextra -Wno-unused-parameter
 SOURCES := $(wildcard src/*.c)
 HEADERS := $(wildcard src/*.h)
-LIBMODS := csv url log args bigint decimal random metric imperial _time cogwheel
+LIBMODS := csv url log args bigint decimal random metric imperial vecmath _time cogwheel
 LIBSRC  := $(foreach m,$(LIBMODS),$(STDLIB)/$(m).fw)
 
 all: $(BUILD)/flywheel-lite
@@ -27,11 +30,11 @@ $(BUILD):
 $(BUILD)/embed: tools/embed.c | $(BUILD)
 	$(CC) -O1 -o $@ $<
 
-$(BUILD)/stdlib_embed.c: $(BUILD)/embed $(LIBSRC)
+$(BUILD)/stdlib_embed.c: $(BUILD)/embed $(LIBSRC) Makefile
 	$(BUILD)/embed $@ $(foreach m,$(LIBMODS),$(m)=$(STDLIB)/$(m).fw)
 
 $(BUILD)/flywheel-lite: $(SOURCES) $(HEADERS) $(BUILD)/stdlib_embed.c
-	$(CC) -std=c11 $(CFLAGS) $(WARN) -Isrc -DLITE_TEST_DIR='"$(abspath tests)"' -o $@ $(SOURCES) $(BUILD)/stdlib_embed.c -lm
+	$(CC) -std=c11 $(CFLAGS) $(WARN) -Isrc -DLITE_TEST_DIR='"$(abspath tests)"' -o $@ $(SOURCES) $(BUILD)/stdlib_embed.c -lm $(LDLIBS)
 
 debug:
 	$(MAKE) BUILD=build-debug CFLAGS="-O0 -g -fsanitize=address,undefined -fno-omit-frame-pointer"

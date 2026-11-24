@@ -156,7 +156,7 @@ bool values_equal(VM *vm, Value a, Value b, bool *out) {
             return call_bool_method(vm, a, k->m_eq, b, out);
         if (!IS_NULL(k->m_equals) && tb == OBJ_INSTANCE)
             return call_bool_method(vm, a, k->m_equals, b, out);
-        if (k->is_variant && tb == OBJ_INSTANCE && AS_INSTANCE(b)->klass == k) {
+        if ((k->is_variant || k->is_struct) && tb == OBJ_INSTANCE && AS_INSTANCE(b)->klass == k) {
             ObjInstance *x = AS_INSTANCE(a), *y = AS_INSTANCE(b);
             for (int i = 0; i < x->nfields; i++) {
                 bool eq;

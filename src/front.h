@@ -144,7 +144,7 @@ typedef struct {
     int nfields;
     FuncDecl *methods;
     int nmethods;
-    bool is_interface;
+    bool is_interface, is_struct;
     const char *variant_of;
     const char **variants;
     int nvariants;
@@ -169,6 +169,7 @@ typedef struct {
     const char *alias;
     const char *kind; /* native language import: c, cxx, rust, zig */
     bool wildcard, path;
+    bool reexport; /* `public import name.*` */
     int line;
 } ImportDecl;
 

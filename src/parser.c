@@ -2015,6 +2015,11 @@ static bool modifier_ahead(Parser *P) {
            (tis(t, "public") || tis(t, "private") || tis(t, "protected") || tis(t, "static")) &&
            peek(P, 1)->kind == T_ID && peek(P, 1)->line == t->line;
 }
+/* `struct` is a soft keyword: it starts a declaration only as `struct Name` on its own line. */
+static bool struct_ahead(Parser *P) {
+    return peek(P, 0)->kind == T_ID && ptext(P, 0, "struct") && peek(P, 1)->kind == T_ID &&
+           peek(P, 1)->line == peek(P, 0)->line && peek(P, 2)->kind == T_NL;
+}
 /* Decorators before `function name` / `class name` on the same line; the nearest applies
  * first. */
 static int decorators(Parser *P, Node ***out) {
@@ -2264,6 +2269,9 @@ static bool parse_program_body(Arena *arena, const char *src, size_t len, Progra
         if (toks.items[i].kind == T_ID && (tis(&toks.items[i], "function") || tis(&toks.items[i], "class")) &&
             toks.items[i + 1].kind == T_ID)
             callables.names[callables.count++] = tstr(&P, &toks.items[i + 1]);
+        else if (i + 2 < toks.count && toks.items[i].kind == T_ID && tis(&toks.items[i], "struct") &&
+                 toks.items[i + 1].kind == T_ID && toks.items[i + 2].kind == T_NL)
+            callables.names[callables.count++] = tstr(&P, &toks.items[i + 1]);
     if (setjmp(jb)) {
         callables = saved_callables;
         return false;
@@ -2311,7 +2319,9 @@ static bool parse_program_body(Arena *arena, const char *src, size_t len, Progra
             }
             continue;
         }
-        if ((hidden || visible) && ptext(&P, 0, "import"))
+        /* `public import name.*` re-exports the module's public names */
+        bool reexport = visible && ptext(&P, 0, "import");
+        if (hidden && ptext(&P, 0, "import"))
             pfail(&P, "visibility applies to declarations, not imports%s", "");
         if (accept(&P, "import")) {
             ImportDecl im;
@@ -2397,6 +2407,11 @@ static bool parse_program_body(Arena *arena, const char *src, size_t len, Progra
                 pfail_at(&P, name_tok->line, name_tok->col, "cannot name the module imported from \"%s\"; add `as name`", im.name);
             }
             im.alias = alias;
+            im.reexport = reexport;
+            if (reexport && !im.wildcard)
+                pfail_at(&P, im.line, 1, "write `public import %s.*` to re-export a module's names", im.name);
+            if (reexport && im.kind)
+                pfail_at(&P, im.line, 1, "native imports cannot be re-exported%s", "");
             if (im.wildcard && !strcmp(im.name, "html"))
                 out->html = true;
             if (im.wildcard && !strcmp(im.name, "svg"))
@@ -2696,9 +2711,10 @@ static bool parse_program_body(Arena *arena, const char *src, size_t len, Progra
             out->classes[out->nclasses++] = c;
         } else if (ndecos && !ptext(&P, 0, "class")) {
             pfail(&P, "decorators apply to functions and classes%s", "");
-        } else if (ptext(&P, 0, "class") || ptext(&P, 0, "interface")) {
+        } else if (ptext(&P, 0, "class") || ptext(&P, 0, "interface") || struct_ahead(&P)) {
             ClassDecl c;
             memset(&c, 0, sizeof c);
+            c.is_struct = ptext(&P, 0, "struct");
             c.is_interface = tis(take(&P), "interface");
             c.line = peek(&P, 0)->line;
             c.name = tstr(&P, identifier(&P));
@@ -2751,6 +2767,9 @@ static bool parse_program_body(Arena *arena, const char *src, size_t len, Progra
                 bool special = k->kind == T_ID && (tis(k, "constructor") || tis(k, "destructor")) &&
                                (peek(&P, 1)->kind == T_NL || peek(&P, 1)->kind == T_EOF || ptext(&P, 1, "(") ||
                                 peek(&P, 1)->kind == T_ID);
+                if (special && c.is_struct)
+                    pfail_at(&P, k->line, k->col,
+                             "structs have no %.*s; write a static function that returns one", k->len, k->text);
                 if (special && c.is_interface)
                     pfail_at(&P, k->line, k->col, "interfaces cannot declare %.*ss", k->len, k->text);
                 if (special) {
@@ -2902,7 +2921,7 @@ static bool parse_program_body(Arena *arena, const char *src, size_t len, Progra
             declared = out->components[out->ncomponents - 1].name;
         else if (out->body.count > nb && out->body.items[nb]->kind == S_DECLARE)
             declared = out->body.items[nb]->name;
-        if ((hidden || visible) && !declared)
+        if ((hidden || visible) && !declared && !reexport)
             pfail(&P, "visibility requires a declaration%s", "");
         if (hidden) {
             GROWV(arena, out->privates, out->nprivates, cap_priv, const char *);

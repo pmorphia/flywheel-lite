@@ -1,0 +1,34 @@
+import c native.buffer
+import++ native.text
+struct Dot
+    double x
+    double y
+end
+int b = buffer.buffer_new(2)
+buffer.buffer_set(b, 0, 1.0)
+buffer.buffer_set(b, 1, 4.0 / 3.0)
+print buffer.buffer_norm(b), buffer.sum(buffer.buffer_data(b), 2)
+buffer.buffer_free(b)
+double[] values = [1.5, 2.5, 3]
+print buffer.sum(values, values.length)
+float[] small = [1, 2, 3]
+buffer.scale(small, small.length, 10)
+i32[] ns = [i32(1), i32(-2)]
+buffer.twice(ns, 2)
+print small, ns
+Dot[] dots = [Dot(1, 2), Dot(3, 4)]
+var kept = dots[0]
+buffer.shift(dots, dots.length, 5)
+print dots, kept
+print buffer.greet("fw"), buffer.even(4)
+try
+    buffer.risky(-1)
+catch NativeError e
+    print "C:", e.message
+end
+print text.reverse("flywheel"), text.sum3(1, 2, 3)
+try
+    text.positive(-1)
+catch NativeError e
+    print "C++:", e.message
+end

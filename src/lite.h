@@ -278,6 +278,7 @@ typedef struct ObjClass {
     Value defaults;           /* closure assigning own field defaults, or null */
     Value singleton;          /* field-less enum member value */
     bool is_interface, is_enum, is_variant, finalized, native;
+    bool is_struct; /* a value type: instances never change (a field write makes a new one) */
     int variant_index;
     Value m_init, m_to_string, m_eq, m_lt, m_le, m_gt, m_ge, m_hash, m_equals, m_next, m_iterator;
     bool has_destructor; /* this class or a base declares `destructor` */
@@ -314,6 +315,9 @@ typedef struct ObjModule {
     ValueArray values;
     ValueArray names_by_slot;
     bool *is_private;
+    /* Re-exported names (`public import name.*`): the module and slot declaring each slot. */
+    struct ObjModule **origin_module;
+    int *origin_slot;
     unsigned char *is_component_slot; /* 1: a component, 2: a void component */
     int private_cap;
     bool native, initialized, initializing, html, repl;
@@ -437,6 +441,9 @@ struct VM {
     Obj *objects;
     size_t bytes_allocated, next_gc;
     int gc_off;
+    bool check_only; /* `check`: native imports are read, not built */
+    bool gc_paused; /* gc.pause(): no automatic collections */
+    int64_t gc_threshold;
     Obj **gray;
     int gray_count, gray_cap;
     Value roots[256];
@@ -514,7 +521,7 @@ void vm_run_finalizers(VM *vm);
 /* Runs the destructors of every instance still alive, at exit. */
 void vm_finalize_all(VM *vm);
 static inline void vm_maybe_gc(VM *vm) {
-    if (TB_UNLIKELY(vm->bytes_allocated > vm->next_gc) && !vm->gc_off) {
+    if (TB_UNLIKELY(vm->bytes_allocated > vm->next_gc) && !vm->gc_off && !vm->gc_paused) {
         gc_collect(vm);
         if (vm->finalizers.count && !vm->finalizing)
             vm_run_finalizers(vm);
@@ -742,6 +749,11 @@ bool lib_element_property(VM *vm, Value self, ObjString *name, Value *out, bool 
 bool lib_element_set_property(VM *vm, Value self, ObjString *name, Value v, bool *found);
 ObjModule *lib_native_module(VM *vm, const char *name);
 bool lib_is_native_module(const char *name);
+/* `import c name` / `import cxx name` (native.c): builds and loads the source, or only reads its
+ * functions when vm->check_only. NULL with err->message set on failure. */
+ObjModule *lib_foreign_module(VM *vm, const char *kind, const char *name, bool path, const char *from,
+                              CompileError *err);
+bool lib_toml_parse(VM *vm, int argc, Value *args, Value *out);
 bool lib_json_parse(VM *vm, const char *s, size_t n, Value *out);
 bool lib_json_encode(VM *vm, Value v, Buf *b, int indent, int level, bool sorted);
 bool lib_element_new(VM *vm, ObjString *tag, ObjList *names, Value *attrs, int nchildren,

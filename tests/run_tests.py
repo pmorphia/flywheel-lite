@@ -29,7 +29,7 @@ for name in ("FORCE_COLOR", "CLICOLOR_FORCE"):
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp(prefix="flywheel-lite-state-")
 REPO = Path(os.environ.get("FLYWHEEL_DIR") or HERE.parent.parent).resolve()
 UNSUPPORTED = {"web", "net", "thread", "sqlite", "regex", "desktop", "crypto", "compress",
-               "toml", "yaml", "flywheel"}
+               "yaml", "flywheel"}
 
 
 def load_suite():
@@ -144,6 +144,10 @@ def main():
         for src in sorted((HERE / "cases").glob("*.fw")):
             name = f"case/{src.stem}"
             if pattern and pattern not in name:
+                continue
+            if os.name == "nt" and unsupported(src.read_text(encoding="utf-8")) == "native import":
+                skipped += 1
+                skips["native import"] = skips.get("native import", 0) + 1
                 continue
             expected = src.with_suffix(".out").read_text(encoding="utf-8") if src.with_suffix(".out").exists() else ""
             err = src.with_suffix(".err").read_text(encoding="utf-8").strip() if src.with_suffix(".err").exists() else None

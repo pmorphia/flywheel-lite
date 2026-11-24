@@ -1497,6 +1497,49 @@ static ObjList *repeat_list(VM *vm, ObjList *l, int64_t n, ObjType type) {
     return r;
 }
 
+/* Assigns a member of a value that is not an instance: a class's static field, a module's
+ * global, or a built-in property. */
+static bool set_other_member(VM *vm, Value obj, ObjString *name, Value v) {
+    if (IS_OBJT(obj, OBJ_CLASS)) {
+        /* Class.field = value assigns a static field where it is declared */
+        Value old;
+        ObjClass *holder = static_holder(AS_CLASS(obj), name, &old);
+        if (!holder || IS_OBJT(old, OBJ_CLOSURE))
+            return vm_throw(vm, "TypeError", "%s has no static field '%s'", AS_CLASS(obj)->name->chars, name->chars);
+        if (!static_allowed(vm, holder, name))
+            return false;
+        Value a;
+        if (table_get(&holder->static_access, name, &a) && (a.as.i & 4))
+            return vm_throw(vm, "TypeError", "static field '%s' of %s is constant", name->chars, holder->name->chars);
+        table_set(vm, &holder->statics, name, v);
+        return true;
+    }
+    if (IS_OBJT(obj, OBJ_MODULE)) {
+        ObjModule *m = AS_MODULE(obj);
+        int s = module_find(m, name);
+        if (s < 0 || m->native)
+            return vm_throw(vm, "TypeError", "cannot assign to %s.%s", m->name->chars, name->chars);
+        while (m->origin_module[s]) {
+            ObjModule *home = m->origin_module[s];
+            s = m->origin_slot[s];
+            m = home;
+        }
+        m->values.items[s] = v;
+        return true;
+    }
+    bool found = false;
+    if (!lib_set_property(vm, obj, name, v, &found))
+        return false;
+    if (!found) {
+        Buf b;
+        buf_init(&b);
+        type_name_of(vm, obj, &b);
+        vm_throw(vm, "TypeError", "cannot assign to member '%s' of %s", name->chars, b.data ? b.data : "value");
+        buf_free(&b);
+    }
+    return found;
+}
+
 /* Operator methods on instances: calls `operator<op>` and stores the result. */
 static bool instance_op(VM *vm, const char *op, Value a, Value b, int argc, Value *out, bool *found) {
     *found = false;
@@ -1653,6 +1696,10 @@ static bool arith(VM *vm, uint8_t op, Value a, Value b, Value *out) {
     }
     bool found;
     if (!instance_op(vm, opname, a, b, 1, out, &found))
+        return false;
+    /* `2 * v` uses the struct's operator too */
+    if (!found && IS_NUM(a) && (op == OP_ADD || op == OP_MUL) && IS_OBJT(b, OBJ_INSTANCE) &&
+        AS_INSTANCE(b)->klass->is_struct && !instance_op(vm, opname, b, a, 1, out, &found))
         return false;
     if (found)
         return true;
@@ -2345,53 +2392,63 @@ static RunResult run(VM *vm, int base) {
                 vm_throw(vm, "TypeError", "%s has no field '%s'", in->klass->name->chars, AS_CSTR(CONST(nk)));
                 THROW();
             }
+            if (TB_UNLIKELY(in->klass->is_struct) && !IS_UNDEF(in->fields[index])) {
+                vm_throw(vm, "TypeError", "cannot assign a field of a temporary or constant %s", in->klass->name->chars);
+                THROW();
+            }
             CHECK(set_field(vm, in, index, v));
             vm->sp -= 2;
             DISPATCH();
         }
-        if (IS_OBJT(obj, OBJ_CLASS)) {
-            /* Class.field = value assigns a static field where it is declared */
-            ObjString *name = AS_STRING(CONST(nk));
-            Value old;
-            ObjClass *holder = static_holder(AS_CLASS(obj), name, &old);
-            if (!holder || IS_OBJT(old, OBJ_CLOSURE)) {
-                vm_throw(vm, "TypeError", "%s has no static field '%s'", AS_CLASS(obj)->name->chars, name->chars);
-                THROW();
-            }
-            CHECK(static_allowed(vm, holder, name));
-            Value a;
-            if (table_get(&holder->static_access, name, &a) && (a.as.i & 4)) {
-                vm_throw(vm, "TypeError", "static field '%s' of %s is constant", name->chars, holder->name->chars);
-                THROW();
-            }
-            table_set(vm, &holder->statics, name, v);
-            vm->sp -= 2;
-            DISPATCH();
-        }
-        if (IS_OBJT(obj, OBJ_MODULE)) {
-            ObjModule *m = AS_MODULE(obj);
-            int s = module_find(m, AS_STRING(CONST(nk)));
-            if (s < 0 || m->native) {
-                vm_throw(vm, "TypeError", "cannot assign to %s.%s", m->name->chars, AS_CSTR(CONST(nk)));
-                THROW();
-            }
-            m->values.items[s] = v;
-            vm->sp -= 2;
-            DISPATCH();
-        }
-        {
-            bool found = false;
-            CHECK(lib_set_property(vm, obj, AS_STRING(CONST(nk)), v, &found));
-            if (!found) {
-                Buf b;
-                buf_init(&b);
-                type_name_of(vm, obj, &b);
-                vm_throw(vm, "TypeError", "cannot assign to member '%s' of %s", AS_CSTR(CONST(nk)), b.data ? b.data : "value");
-                buf_free(&b);
-                THROW();
-            }
-        }
+        CHECK(set_other_member(vm, obj, AS_STRING(CONST(nk)), v));
         vm->sp -= 2;
+        DISPATCH();
+    }
+    CASE(OP_PICK) {
+        uint8_t depth = READ_BYTE();
+        Value v = PEEK(depth);
+        PUSH(v);
+        DISPATCH();
+    }
+    CASE(OP_SET_PATH) {
+        uint16_t nk = READ_U16(), ck = READ_U16();
+        uint8_t drop = READ_BYTE();
+        uint16_t off = READ_U16();
+        Value obj = PEEK(1), v = PEEK(0);
+        SYNC();
+        if (IS_OBJT(obj, OBJ_INSTANCE)) {
+            ObjInstance *in = AS_INSTANCE(obj);
+            InlineCache *c = &frame->closure->fn->caches[ck];
+            int index = -1;
+            if (c->klass == in->klass)
+                index = c->index;
+            else {
+                Value idx;
+                if (table_get(&in->klass->field_index, AS_STRING(CONST(nk)), &idx)) {
+                    index = (int)idx.as.i;
+                    CHECK(field_allowed(vm, in->klass, index, AS_STRING(CONST(nk))));
+                    c->klass = in->klass;
+                    c->index = index;
+                }
+            }
+            if (index < 0) {
+                vm_throw(vm, "TypeError", "%s has no field '%s'", in->klass->name->chars, AS_CSTR(CONST(nk)));
+                THROW();
+            }
+            if (in->klass->is_struct) {
+                ObjInstance *copy = new_instance(vm, in->klass);
+                memcpy(copy->fields, in->fields, sizeof(Value) * (size_t)in->nfields);
+                vm->sp[-2] = val_obj(copy);
+                CHECK(set_field(vm, copy, index, v));
+                vm->sp--;
+                vm_maybe_gc(vm);
+                DISPATCH();
+            }
+            CHECK(set_field(vm, in, index, v));
+        } else
+            CHECK(set_other_member(vm, obj, AS_STRING(CONST(nk)), v));
+        vm->sp -= drop;
+        ip += off;
         DISPATCH();
     }
     CASE(OP_GET_INDEX) {
@@ -2694,7 +2751,7 @@ static RunResult run(VM *vm, int base) {
     CASE(OP_LOOP) {
         uint16_t off = READ_U16();
         ip -= off;
-        if (TB_UNLIKELY(vm->bytes_allocated > vm->next_gc) && !vm->gc_off) {
+        if (TB_UNLIKELY(vm->bytes_allocated > vm->next_gc) && !vm->gc_off && !vm->gc_paused) {
             SYNC();
             gc_collect(vm);
         }
@@ -3785,6 +3842,7 @@ void vm_init(VM *vm, int argc, char **argv) {
     vm->stack = xmalloc(sizeof(Value) * STACK_MAX);
     vm->sp = vm->stack;
     vm->next_gc = 16u * 1024 * 1024;
+    vm->gc_threshold = 20000;
     vm->error = val_null();
     table_init(&vm->strings);
     table_init(&vm->builtins);

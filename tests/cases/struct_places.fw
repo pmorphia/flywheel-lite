@@ -1,0 +1,44 @@
+import vecmath.*
+import "support/reexport.fw" as sh
+class Cam
+    Vec3 at = Vec3()
+    Vec2[] pts = [Vec2(1, 2), Vec2(3, 4)]
+    function go()
+        this.at.x += 5
+        this.pts[1].y = 9
+    end
+end
+struct Line
+    Vec2 a
+    Vec2 b
+end
+var c = Cam()
+c.go()
+var d = c.at
+c.at.y = 7
+print c.at, d, c.pts, (2 * Vec2(1, 2)).x
+Cam[] cs = [c]
+cs[0].at.z -= 1
+print c.at
+map<string, Line[]> lines = {"a": [Line(Vec2(0, 0), Vec2(1, 1))]}
+var before = lines["a"][0]
+lines["a"][0].b.x += 4
+print lines["a"][0], before
+var total = Vec2()
+total.x = 10
+total.x += 10
+print total
+function local_line()
+    var l = Line(Vec2(0, 0), Vec2(0, 0))
+    l.b.x = 3
+    l.a = l.b
+    l.a.y = 2
+    print l
+end
+local_line()
+print sh.Vec2(1, 2) == Vec2(1, 2), sh.origin().x
+sh.Vec2 typed = sh.origin()
+print typed is Vec2
+Vec2 struct = Vec2(1, 1)
+struct.x = 8
+print struct

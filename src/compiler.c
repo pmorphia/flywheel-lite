@@ -207,6 +207,7 @@ typedef struct {
 } TypeReader;
 
 static ObjTypeDesc *read_type(TypeReader *r);
+static void follow_origin(ObjModule **m, int *slot);
 static ObjModule *find_alias(Compiler *C, const char *name);
 static bool json_alias(Compiler *C, const char *n, size_t len) {
     char *h = xstrndup(n, len);
@@ -227,6 +228,7 @@ static void resolve_named_type(Compiler *C, ObjTypeDesc *t, const char *n, size_
     if (slot >= 0) {
         t->module = C->module;
         t->slot = slot;
+        follow_origin(&t->module, &t->slot);
         if (dot)
             t->member = str_intern(C->vm, dot + 1, len - hl - 1);
         return;
@@ -289,6 +291,7 @@ static void resolve_named_type(Compiler *C, ObjTypeDesc *t, const char *n, size_
         return;
     t->module = m;
     t->slot = s;
+    follow_origin(&t->module, &t->slot);
     if (dot2)
         t->member = str_intern(C->vm, dot2 + 1, rl - fl - 1);
 }
@@ -514,6 +517,14 @@ static const char *strip_type_args(Compiler *C, const char *name) {
         return name;
     return arena_strndup(C->arena, name, (size_t)(lt - name));
 }
+/* A re-exported name is the declaring module's own. */
+static void follow_origin(ObjModule **m, int *slot) {
+    while (*slot < (*m)->private_cap && (*m)->origin_module[*slot]) {
+        ObjModule *from = (*m)->origin_module[*slot];
+        *slot = (*m)->origin_slot[*slot];
+        *m = from;
+    }
+}
 static ObjModule *find_alias(Compiler *C, const char *name) {
     for (int i = C->naliases - 1; i >= 0; i--)
         if (!strcmp(C->aliases[i].alias, name))
@@ -541,7 +552,10 @@ static Resolved resolve(Compiler *C, const char *name) {
     ObjString *s = str_intern_c(C->vm, name);
     int g = module_find(C->module, s);
     if (g >= 0) {
-        r.kind = R_GLOBAL;
+        ObjModule *home = C->module;
+        follow_origin(&home, &g);
+        r.kind = home == C->module ? R_GLOBAL : R_MGLOBAL;
+        r.module = home;
         r.index = g;
         return r;
     }
@@ -788,6 +802,7 @@ static void compile_module_member(Compiler *C, ObjModule *mod, const char *raw, 
         emit_const(C, v);
         return;
     }
+    follow_origin(&mod, &slot);
     emit(C, OP_GET_MGLOBAL);
     emit16(C, make_const(C, val_obj(mod)));
     emit16(C, slot);
@@ -1763,6 +1778,165 @@ static void emit_coerce(Compiler *C, Value type, const char *what) {
     emit16(C, make_const(C, val_obj(str_intern_c(C->vm, what))));
 }
 
+/* Field writes to a struct held somewhere (`v.x = 1`, `points[i].at.x += 2`). Struct instances are
+ * never changed: OP_SET_PATH replaces the struct with a copy that has the new field, and the copy
+ * is stored back where it was read from, which may itself be a struct's field. When the object
+ * turns out to be an ordinary instance, OP_SET_PATH assigns it, drops the whole path from the
+ * stack, and jumps past the stores. */
+static bool is_place(Compiler *C, Node *e) {
+    ObjModule *mod;
+    switch (e->kind) {
+    case N_NAME: {
+        Resolved r = resolve(C, e->text);
+        if ((r.kind == R_LOCAL || r.kind == R_UPVAL) && r.local)
+            return !r.local->is_const;
+        return r.kind == R_GLOBAL && (r.index >= C->nglobal_types || !C->global_const[r.index]);
+    }
+    case N_INST:
+        return true;
+    case N_MEMBER:
+        return !member_on_module(C, e, &mod) || !mod->native;
+    case N_INDEX:
+        return e->args.count == 2;
+    default:
+        return false;
+    }
+}
+/* Whether evaluating e again, or later, has no side effects. */
+static bool is_pure(Node *e) {
+    switch (e->kind) {
+    case N_NAME:
+    case N_THIS:
+    case N_INST:
+    case N_INT:
+    case N_STRING:
+    case N_BOOL:
+    case N_CHAR:
+        return true;
+    case N_MEMBER:
+        return is_pure(e->args.items[0]);
+    case N_INDEX:
+        return e->args.count == 2 && is_pure(e->args.items[0]) && is_pure(e->args.items[1]);
+    default:
+        return false;
+    }
+}
+static void emit_member(Compiler *C, uint8_t op, const char *name) {
+    emit(C, op);
+    emit16(C, name_const(C, name));
+    emit16(C, new_cache(C));
+}
+/* Pushes the value of place e on top of what storing back to it needs; the number pushed. */
+static int emit_place(Compiler *C, Node *e) {
+    ObjModule *mod;
+    if (!is_place(C, e) || e->kind == N_NAME || (e->kind == N_MEMBER && member_on_module(C, e, &mod))) {
+        compile_expr(C, e);
+        return 1;
+    }
+    if (e->kind == N_INST) {
+        emit_receiver(C, e->line);
+        emit(C, OP_DUP);
+        emit_member(C, OP_GET_MEMBER, e->text);
+        return 2;
+    }
+    int n = emit_place(C, e->args.items[0]);
+    if (e->kind == N_MEMBER) {
+        emit(C, OP_DUP);
+        emit_member(C, OP_GET_MEMBER, e->text);
+        return n + 1;
+    }
+    compile_expr(C, e->args.items[1]);
+    emit(C, OP_DUP2);
+    emit(C, OP_GET_INDEX);
+    return n + 2;
+}
+static int emit_set_path(Compiler *C, const char *name, int total) {
+    emit_member(C, OP_SET_PATH, name);
+    if (total > 255)
+        cfail(C, C->line, "assignment target too deep");
+    emit(C, (uint8_t)total);
+    emit16(C, 0xffff);
+    return chunk(C)->count - 2;
+}
+/* Stores the top value into place e, whose emit_place pushed n values (the top one replaced by the
+ * new value); `below` values of the assignment lie under them and stay. */
+static void emit_store_place(Compiler *C, Node *e, int n, int below, Jumps *done) {
+    ObjModule *mod;
+    if (e->kind == N_NAME) {
+        Resolved r = resolve(C, e->text);
+        if (r.kind == R_LOCAL)
+            emit2(C, OP_SET_LOCAL, (uint8_t)r.index);
+        else if (r.kind == R_UPVAL)
+            emit2(C, OP_SET_UPVAL, (uint8_t)r.index);
+        else {
+            emit(C, OP_SET_GLOBAL);
+            emit16(C, r.index);
+        }
+        return;
+    }
+    if (e->kind == N_INST) {
+        emit_member(C, OP_SET_MEMBER, e->text);
+        return;
+    }
+    if (e->kind == N_MEMBER && member_on_module(C, e, &mod)) {
+        int slot = module_find(mod, str_intern_c(C->vm, e->text));
+        follow_origin(&mod, &slot);
+        emit(C, OP_SET_MGLOBAL);
+        emit16(C, make_const(C, val_obj(mod)));
+        emit16(C, slot);
+        return;
+    }
+    Node *base = e->args.items[0];
+    if (e->kind == N_INDEX) {
+        emit(C, OP_SET_INDEX);
+        for (int i = 0; i < n - 3; i++)
+            emit(C, OP_POP);
+        return;
+    }
+    if (!is_place(C, base)) {
+        emit_member(C, OP_SET_MEMBER, e->text);
+        return;
+    }
+    jumps_add(done, emit_set_path(C, e->text, n + below));
+    emit_store_place(C, base, n - 1, below, done);
+}
+/* `base.name = value` and `base.name += value` where base is a place. */
+static void compile_assign_path(Compiler *C, Node *s, uint8_t code) {
+    Node *t = s->target, *base = t->args.items[0];
+    Jumps done = {0};
+    int below, n;
+    if (is_pure(base)) {
+        /* the value first: computing it may change the struct the path goes through */
+        if (code) {
+            compile_expr(C, base);
+            emit_member(C, OP_GET_MEMBER, t->text);
+        }
+        compile_expr(C, s->expr);
+        if (code)
+            emit(C, code);
+        n = emit_place(C, base);
+        emit2(C, OP_PICK, (uint8_t)n);
+        below = 1;
+    } else {
+        n = emit_place(C, base);
+        if (code) {
+            emit(C, OP_DUP);
+            emit_member(C, OP_GET_MEMBER, t->text);
+        }
+        compile_expr(C, s->expr);
+        if (code)
+            emit(C, code);
+        below = 0;
+    }
+    jumps_add(&done, emit_set_path(C, t->text, n + 1 + below));
+    emit_store_place(C, base, n, below, &done);
+    if (below)
+        emit(C, OP_POP);
+    for (int i = 0; i < done.count; i++)
+        patch_jump(C, done.items[i]);
+    free(done.items);
+}
+
 static void compile_assign(Compiler *C, Node *s) {
     Node *t = s->target;
     const char *op = s->op;
@@ -1827,6 +2001,10 @@ static void compile_assign(Compiler *C, Node *s) {
             emit(C, OP_SET_MGLOBAL);
             emit16(C, make_const(C, val_obj(mod)));
             emit16(C, slot);
+            return;
+        }
+        if (t->kind == N_MEMBER && !s->valueless && is_place(C, t->args.items[0])) {
+            compile_assign_path(C, s, compound ? code : 0);
             return;
         }
         if (t->kind == N_INST)
@@ -2185,6 +2363,7 @@ static ObjClass *build_class(Compiler *C, ClassDecl *d) {
     ObjClass *k = new_class(vm, str_intern_c(vm, d->name));
     k->module = C->module;
     k->is_interface = d->is_interface;
+    k->is_struct = d->is_struct;
     k->is_variant = d->variant_of != NULL;
     k->is_enum = d->nvariants > 0;
     k->nfields = d->nfields;
@@ -2359,12 +2538,11 @@ static void process_imports(Compiler *C) {
     for (int i = 0; i < p->nimports; i++) {
         ImportDecl *im = &p->imports[i];
         C->line = im->line;
-        if (im->kind)
-            cfail(C, im->line, "native '%s' imports need the Flywheel compiler; Flywheel Lite does not build native code", im->kind);
-        bool native = false;
+        bool native = im->kind != NULL;
         CompileError sub;
         memset(&sub, 0, sizeof sub);
-        ObjModule *m = vm_load_module(C->vm, im->name, C->path, &native, &sub);
+        ObjModule *m = im->kind ? lib_foreign_module(C->vm, im->kind, im->name, im->path, C->path, &sub)
+                                : vm_load_module(C->vm, im->name, C->path, &native, &sub);
         if (!m) {
             if (sub.file) {
                 *C->err = sub;
@@ -2374,7 +2552,7 @@ static void process_imports(Compiler *C) {
         }
         add_alias(C, im->alias, m);
         ObjModule *units = m;
-        if (native && !strcmp(im->name, "time")) {
+        if (native && !im->kind && !strcmp(im->name, "time")) {
             /* `import time` also brings the time unit namespace (stdlib/fw/_time.fw) */
             bool unused;
             units = vm_load_module(C->vm, "_time", C->path, &unused, &sub);
@@ -2403,23 +2581,60 @@ static void process_imports(Compiler *C) {
                 bool dup = false;
                 for (int k = 0; k < C->nwilds; k++)
                     if (!strcmp(C->wilds[k].name, w.name)) {
-                        if (C->wilds[k].from != m)
+                        ObjModule *home = m;
+                        int home_slot = s;
+                        follow_origin(&home, &home_slot);
+                        if (C->wilds[k].from != home)
                             cfail(C, im->line, "wildcard imports both define '%s'", w.name);
                         dup = true;
                     }
                 if (dup)
                     continue;
-                w.from = m;
+                ObjModule *home = m;
+                int home_slot = s;
+                follow_origin(&home, &home_slot);
+                w.from = home;
                 if (m->native) {
                     w.value = m->values.items[s];
                 } else {
-                    w.module = m;
-                    w.slot = s;
+                    w.module = home;
+                    w.slot = home_slot;
                     w.component = m->is_component_slot && m->is_component_slot[s];
                     w.void_component = m->is_component_slot && m->is_component_slot[s] == 2;
                 }
                 add_wild(C, w);
             }
+        }
+    }
+}
+
+/* `public import name.*`: each public name of the module gets a slot here that stands for the
+ * declaring module's. Names this module finds through its own wildcard import keep resolving
+ * there; the slot is what importers see. */
+static void declare_reexports(Compiler *C) {
+    for (int i = 0; i < C->prog->nimports; i++) {
+        ImportDecl *im = &C->prog->imports[i];
+        if (!im->reexport)
+            continue;
+        C->line = im->line;
+        ObjModule *m = find_alias(C, im->alias);
+        if (m->native)
+            cfail(C, im->line, "native module '%s' cannot be re-exported", im->name);
+        for (int s = 0; s < m->names_by_slot.count; s++) {
+            ObjString *nm = AS_STRING(m->names_by_slot.items[s]);
+            if (m->is_private[s] || nm->chars[0] == '$')
+                continue;
+            ObjModule *home = m;
+            int slot = s;
+            follow_origin(&home, &slot);
+            int own = module_find(C->module, nm);
+            if (own >= 0 && C->module->origin_module[own] == home)
+                continue;
+            declare_global(C, nm->chars, im->line);
+            own = module_find(C->module, nm);
+            C->module->origin_module[own] = home;
+            C->module->origin_slot[own] = slot;
+            C->module->is_component_slot[own] = m->is_component_slot[s];
         }
     }
 }
@@ -2611,6 +2826,7 @@ ObjFunction *compile_module(VM *vm, ObjModule *module, const char *source, size_
     process_imports(C);
     if (!lower_module_units(C))
         goto done;
+    declare_reexports(C);
     /* Predeclare top-level names so functions can refer to later declarations. */
     for (int i = 0; i < prog.nfunctions; i++)
         declare_global(C, prog.functions[i].name, prog.functions[i].line);
@@ -2675,6 +2891,19 @@ ObjFunction *compile_module(VM *vm, ObjModule *module, const char *source, size_
         emit(C, OP_IMPORT);
         emit16(C, make_const(C, val_obj(m)));
         emit(C, OP_POP);
+    }
+    /* A re-exported name is also readable through the module as a value. */
+    for (int s = 0; s < module->values.count; s++) {
+        if (!module->origin_module[s])
+            continue;
+        ObjModule *home = module;
+        int slot = s;
+        follow_origin(&home, &slot);
+        emit(C, OP_GET_MGLOBAL);
+        emit16(C, make_const(C, val_obj(home)));
+        emit16(C, slot);
+        emit(C, OP_SET_GLOBAL);
+        emit16(C, s);
     }
     /* Unit modules imported for their namespaces alone (_time behind `import time`) too. */
     for (int i = 0; i < C->nunit_modules; i++) {

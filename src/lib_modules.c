@@ -1394,6 +1394,164 @@ NATIVE(os_process_run) {
     }
     return result_instance(vm, &r, out);
 }
+/* os.start and friends: programs that run on in the background. */
+#ifdef _WIN32
+static bool no_background(VM *vm) {
+    return vm_throw(vm, "ProcessError", "background processes are not available in Flywheel Lite on Windows");
+}
+NATIVE(os_start) { (void)argc, (void)args, (void)out; return no_background(vm); }
+NATIVE(os_alive) { (void)argc, (void)args, (void)out; return no_background(vm); }
+NATIVE(os_wait) { (void)argc, (void)args, (void)out; return no_background(vm); }
+NATIVE(os_kill) { (void)argc, (void)args, (void)out; return no_background(vm); }
+NATIVE(os_pid) {
+    (void)vm, (void)argc, (void)args;
+    *out = val_int((int64_t)GetCurrentProcessId());
+    return true;
+}
+#else
+typedef struct {
+    int64_t pid, status;
+} ExitedChild;
+static ExitedChild *exited_children;
+static int nexited_children;
+
+NATIVE(os_start) {
+    ObjInstance *p = IS_OBJT(args[0], OBJ_INSTANCE) ? AS_INSTANCE(args[0]) : NULL;
+    if (p && strcmp(p->klass->name->chars, "os.process"))
+        return vm_throw(vm, "TypeError", "os.start expects a string[] or an os.process");
+    char **argv = NULL;
+    int n = 0;
+    if (!argv_of(vm, p ? p->fields[0] : args[0], &argv, &n))
+        return false;
+    if (!n || !argv[0][0]) {
+        free(argv);
+        return vm_throw(vm, "ProcessError", "os.start needs a nonempty command");
+    }
+    const char *log = argc > 1 && IS_STRING(args[1]) ? AS_CSTR(args[1]) : "";
+    const char *cwd = p && IS_STRING(p->fields[2]) ? AS_CSTR(p->fields[2]) : "";
+    ObjMap *env = p && IS_MAP(p->fields[3]) ? AS_MAP(p->fields[3]) : NULL;
+    bool inherit = !p || !IS_BOOL(p->fields[4]) || p->fields[4].as.b;
+    int log_fd = -1, errors[2];
+    if (log[0] && (log_fd = open(log, O_WRONLY | O_CREAT | O_APPEND, 0644)) < 0) {
+        free(argv);
+        return vm_throw(vm, "FileError", "cannot open log file '%s': %s", log, strerror(errno));
+    }
+    if (pipe(errors)) {
+        free(argv);
+        if (log_fd >= 0)
+            close(log_fd);
+        return vm_throw(vm, "ProcessError", "cannot start process: %s", strerror(errno));
+    }
+    fcntl(errors[0], F_SETFD, FD_CLOEXEC);
+    fcntl(errors[1], F_SETFD, FD_CLOEXEC);
+    fflush(NULL);
+    pid_t pid = fork();
+    if (pid == 0) {
+        int null = open("/dev/null", O_RDONLY);
+        if (null >= 0)
+            dup2(null, 0);
+        if (log_fd >= 0) {
+            dup2(log_fd, 1);
+            dup2(log_fd, 2);
+            close(log_fd);
+        }
+        bool ok = !cwd[0] || chdir(cwd) == 0;
+        if (ok) {
+            extern char **environ;
+            static char *empty[] = {NULL};
+            if (!inherit)
+                environ = empty;
+            for (int i = 0; env && i < env->used; i++)
+                if (env->entries[i].live && IS_STRING(env->entries[i].key) && IS_STRING(env->entries[i].value))
+                    setenv(AS_CSTR(env->entries[i].key), AS_CSTR(env->entries[i].value), 1);
+            execvp(argv[0], argv);
+        }
+        int e = errno;
+        if (write(errors[1], &e, sizeof e) < 0) {
+        }
+        _exit(127);
+    }
+    int failure = pid < 0 ? errno : 0;
+    close(errors[1]);
+    if (log_fd >= 0)
+        close(log_fd);
+    ssize_t got = 0;
+    if (pid > 0)
+        while ((got = read(errors[0], &failure, sizeof failure)) < 0 && errno == EINTR) {
+        }
+    close(errors[0]);
+    bool ok = pid > 0 && got != (ssize_t)sizeof failure;
+    if (pid > 0 && !ok)
+        waitpid(pid, NULL, 0);
+    if (!ok)
+        vm_throw(vm, "ProcessError", "cannot start process '%s': %s", argv[0], strerror(failure));
+    free(argv);
+    /* a reused process ID is a new child */
+    for (int i = 0; ok && i < nexited_children; i++)
+        if (exited_children[i].pid == pid)
+            exited_children[i--] = exited_children[--nexited_children];
+    if (ok)
+        *out = val_int(pid);
+    return ok;
+}
+/* The exit status of a child (negative for a signal); *running when it has not ended. */
+static bool child_status(VM *vm, int64_t pid, bool block, int64_t *status, bool *running) {
+    *running = false;
+    for (int i = 0; i < nexited_children; i++)
+        if (exited_children[i].pid == pid) {
+            *status = exited_children[i].status;
+            return true;
+        }
+    int st = 0;
+    pid_t r = -1;
+    if (pid > 0)
+        while ((r = waitpid((pid_t)pid, &st, block ? 0 : WNOHANG)) < 0 && errno == EINTR) {
+        }
+    if (r < 0)
+        return vm_throw(vm, "ProcessError", "process %lld is not a child of this program", (long long)pid);
+    if (!r) {
+        *running = true;
+        return true;
+    }
+    *status = WIFSIGNALED(st) ? -WTERMSIG(st) : WEXITSTATUS(st);
+    exited_children = xrealloc(exited_children, sizeof(ExitedChild) * (size_t)(nexited_children + 1));
+    exited_children[nexited_children++] = (ExitedChild){pid, *status};
+    return true;
+}
+NATIVE(os_alive) {
+    (void)argc;
+    int64_t pid, status;
+    bool running;
+    if (!to_int64(vm, args[0], &pid, "os.alive") || !child_status(vm, pid, false, &status, &running))
+        return false;
+    *out = val_bool(running);
+    return true;
+}
+NATIVE(os_wait) {
+    (void)argc;
+    int64_t pid, status = 0;
+    bool running;
+    if (!to_int64(vm, args[0], &pid, "os.wait") || !child_status(vm, pid, true, &status, &running))
+        return false;
+    *out = val_int(status);
+    return true;
+}
+NATIVE(os_kill) {
+    int64_t pid, sig = 15;
+    if (!to_int64(vm, args[0], &pid, "os.kill") || (argc > 1 && !to_int64(vm, args[1], &sig, "os.kill")))
+        return false;
+    if (pid <= 0)
+        return vm_throw(vm, "ProcessError", "os.kill needs a process ID above 0");
+    /* the process group it leads, if it made one, else the process */
+    *out = val_bool((pid != getpgrp() && kill(-(pid_t)pid, (int)sig) == 0) || kill((pid_t)pid, (int)sig) == 0);
+    return true;
+}
+NATIVE(os_pid) {
+    (void)vm, (void)argc, (void)args;
+    *out = val_int(getpid());
+    return true;
+}
+#endif
 NATIVE(os_pipeline) {
     if (!IS_LIST(args[0]))
         return vm_throw(vm, "ProcessError", "os.pipeline expects string[][]");
@@ -1496,6 +1654,9 @@ static void make_os(VM *vm, ObjModule *m) {
     ObjNative *run = new_native(vm, "run", os_process_run, 1, 1);
     run->is_method = true;
     table_set(vm, &pk->methods, str_intern_c(vm, "run"), val_obj(run));
+    ObjNative *start = new_native(vm, "start", os_start, 1, 2);
+    start->is_method = true;
+    table_set(vm, &pk->methods, str_intern_c(vm, "start"), val_obj(start));
     module_set_value(vm, m, "process_type", val_obj(pk));
     struct {
         const char *n;
@@ -1505,7 +1666,9 @@ static void make_os(VM *vm, ObjModule *m) {
                {"exit", os_exit, 0, 1},         {"shell", os_shell, 1, 1},         {"command", os_command, 1, 1},
                {"run", os_run, 1, 3},           {"process", os_process, 1, 1},     {"pipeline", os_pipeline, 1, 2},
                {"cwd", os_cwd, 0, 0},           {"chdir", os_chdir, 1, 1},         {"platform", os_platform, 0, 0},
-               {"environment", os_environment, 0, 0}, {NULL, NULL, 0, 0}};
+               {"environment", os_environment, 0, 0}, {"start", os_start, 1, 2}, {"alive", os_alive, 1, 1},
+               {"wait", os_wait, 1, 1},        {"kill", os_kill, 1, 2},            {"pid", os_pid, 0, 0},
+               {NULL, NULL, 0, 0}};
     for (int i = 0; fns[i].n; i++)
         module_set_native(vm, m, fns[i].n, fns[i].f, fns[i].a, fns[i].b);
 }
@@ -1936,7 +2099,7 @@ NATIVE(ts_live_objects) {
     gc_collect(vm); /* count what reference counting would still hold */
     int64_t n = 0;
     for (Obj *o = vm->objects; o; o = o->next)
-        if (o->type == OBJ_INSTANCE)
+        if (o->type == OBJ_INSTANCE && !((ObjInstance *)o)->klass->is_struct)
             n++;
     *out = val_int(n);
     return true;
@@ -1985,6 +2148,43 @@ NATIVE(gc_pending) {
     (void)args;
     (void)vm;
     *out = val_int(0);
+    return true;
+}
+
+/* gc.step(budget): the collector here runs whole, so a step collects once the next automatic
+ * collection is near, and otherwise returns at once. */
+NATIVE(gc_step) {
+    (void)args;
+    *out = val_int(0);
+    return vm->bytes_allocated < vm->next_gc - vm->next_gc / 4 ? true : gc_collect_native(vm, argc, args, out);
+}
+NATIVE(gc_pause) {
+    (void)argc;
+    (void)args;
+    (void)out;
+    vm->gc_paused = true;
+    return true;
+}
+NATIVE(gc_resume) {
+    (void)argc;
+    (void)args;
+    (void)out;
+    vm->gc_paused = false;
+    return true;
+}
+NATIVE(gc_is_paused) {
+    (void)argc;
+    (void)args;
+    *out = val_bool(vm->gc_paused);
+    return true;
+}
+/* Stored for programs that read it back; collections here are paced by allocated bytes. */
+NATIVE(gc_threshold) {
+    *out = val_int(vm->gc_threshold);
+    if (argc && !to_int64(vm, args[0], &vm->gc_threshold, "gc.threshold"))
+        return false;
+    if (argc)
+        *out = val_int(vm->gc_threshold);
     return true;
 }
 
@@ -2213,7 +2413,7 @@ NATIVE(h_escape) {
 void lib_json_module(VM *vm, ObjModule *m);
 
 static const char *unavailable[] = {"web", "net", "thread", "sqlite", "regex", "desktop", "crypto", "compress",
-                                    "toml", "yaml", "flywheel", NULL};
+                                    "yaml", "flywheel", NULL};
 bool lib_is_native_module(const char *name) {
     for (int i = 0; unavailable[i]; i++)
         if (!strcmp(unavailable[i], name))
@@ -2228,7 +2428,7 @@ NATIVE(hot_never) {
 }
 ObjModule *lib_native_module(VM *vm, const char *name) {
     static const char *known[] = {"math", "fs", "os", "time", "io", "json", "testing", "collections",
-                                  "encoding", "uuid", "html", "svg", "gc", "core", "hot", NULL};
+                                  "encoding", "uuid", "html", "svg", "gc", "core", "hot", "toml", NULL};
     bool ok = false;
     for (int i = 0; known[i]; i++)
         if (!strcmp(known[i], name))
@@ -2278,9 +2478,16 @@ ObjModule *lib_native_module(VM *vm, const char *name) {
         /* Hot reload is the native compiler's (flywheel --hot); here it never reloads. */
         module_set_native(vm, m, "reload", hot_never, 0, 0);
         module_set_native(vm, m, "enabled", hot_never, 0, 0);
+    } else if (!strcmp(name, "toml")) {
+        module_set_native(vm, m, "parse", lib_toml_parse, 1, 1);
     } else if (!strcmp(name, "gc")) {
         module_set_native(vm, m, "collect", gc_collect_native, 0, 0);
         module_set_native(vm, m, "pending", gc_pending, 0, 0);
+        module_set_native(vm, m, "step", gc_step, 0, 1);
+        module_set_native(vm, m, "pause", gc_pause, 0, 0);
+        module_set_native(vm, m, "resume", gc_resume, 0, 0);
+        module_set_native(vm, m, "paused", gc_is_paused, 0, 0);
+        module_set_native(vm, m, "threshold", gc_threshold, 0, 1);
     } else if (!strcmp(name, "core")) {
         static const char *names[] = {"print", "input", "len", "typeof", "string", "int", "double", "bool", "char", NULL};
         for (int i = 0; names[i]; i++) {

@@ -10,9 +10,4 @@ positive/weak_references           # weak references clear at collection, not wh
 positive/cycle_collection          # live_objects() collects first, so unreachable cycles are never counted
 trap/narrowed_global_changed       # flow-typing traps on narrowed globals need static types
 positive/destructors           # destructors run at collection or exit, not when the last reference drops
-positive/os_background_processes  # os.start, os.alive, os.wait, os.kill, and os.pid are not implemented
-positive/struct_values             # `struct` value types (Flywheel 2.20) are not implemented
-positive/struct_storage            # `struct` value types (Flywheel 2.20) are not implemented
-positive/quantity_struct_fields     # `struct` value types (Flywheel 2.20) are not implemented
-positive/gc_controls               # gc.step, gc.pause, gc.resume, gc.paused, and gc.threshold are not implemented
-positive/deep_copy_graph           # uses a `struct` (Flywheel 2.20), which is not implemented; deep_copy itself works
+positive/gc_controls               # the collector runs whole: gc.pending() is 0 and gc.step() collects everything or nothing

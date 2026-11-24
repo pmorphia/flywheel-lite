@@ -408,6 +408,10 @@ int module_slot(VM *vm, ObjModule *m, ObjString *name) {
         memset(m->is_private + m->private_cap, 0, (size_t)(nc - m->private_cap));
         m->is_component_slot = xrealloc(m->is_component_slot, (size_t)nc);
         memset(m->is_component_slot + m->private_cap, 0, (size_t)(nc - m->private_cap));
+        m->origin_module = xrealloc(m->origin_module, sizeof *m->origin_module * (size_t)nc);
+        m->origin_slot = xrealloc(m->origin_slot, sizeof *m->origin_slot * (size_t)nc);
+        for (int i = m->private_cap; i < nc; i++)
+            m->origin_module[i] = NULL;
         m->private_cap = nc;
     }
     return s;
@@ -772,6 +776,8 @@ static void free_obj(VM *vm, Obj *o) {
         va_free(vm, &m->names_by_slot);
         free(m->is_private);
         free(m->is_component_slot);
+        free(m->origin_module);
+        free(m->origin_slot);
         free_unit_exports(m->unit_exports, m->nunit_exports);
         tb_realloc(vm, o, sizeof(ObjModule), 0);
         return;

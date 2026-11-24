@@ -137,6 +137,7 @@ static void disasm_function(VM *vm, ObjFunction *fn, int depth) {
         case OP_FIELD_AT:
         case OP_RESULT_IS:
         case OP_RANGE_PREP:
+        case OP_PICK:
             printf(" %d", c->code[i++]);
             break;
         case OP_GET_MGLOBAL:
@@ -147,10 +148,16 @@ static void disasm_function(VM *vm, ObjFunction *fn, int depth) {
             break;
         }
         case OP_GET_MEMBER:
+        case OP_SET_PATH:
         case OP_SET_MEMBER: {
             int k = U16();
             i += 2;
             printf(" %s", k < c->constants.count && IS_STRING(c->constants.items[k]) ? AS_CSTR(c->constants.items[k]) : "?");
+            if (op == OP_SET_PATH) {
+                int n = c->code[i++];
+                int off = U16();
+                printf(" pop %d -> %d", n, i + off);
+            }
             break;
         }
         case OP_INVOKE: {
@@ -866,6 +873,7 @@ int main(int argc, char **argv) {
         }
     }
     vm_init(vm, nprogram, program_args);
+    vm->check_only = mode == CHECK || mode == DISASM;
     vm->exe_dir = exe_dir;
     if (mode == CHECK || mode == DISASM)
         return compile_only(vm, path, source, len, mode == DISASM);

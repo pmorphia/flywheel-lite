@@ -1,0 +1,8 @@
+Vec3(x=5, y=7, z=0) Vec3(x=5, y=0, z=0) [Vec2(x=1, y=2), Vec2(x=3, y=9)] 2
+Vec3(x=5, y=7, z=-1)
+Line(a=Vec2(x=0, y=0), b=Vec2(x=5, y=1)) Line(a=Vec2(x=0, y=0), b=Vec2(x=1, y=1))
+Vec2(x=20, y=0)
+Line(a=Vec2(x=3, y=2), b=Vec2(x=3, y=0))
+true 0
+true
+Vec2(x=8, y=1)

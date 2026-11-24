@@ -22,6 +22,9 @@
     X(OP_SET_MGLOBAL)    /* u16 module const, u16 slot, pops */                                   \
     X(OP_GET_MEMBER)     /* u16 name, u16 cache */                                                \
     X(OP_SET_MEMBER)     /* u16 name, u16 cache: [obj value] -> [] */                             \
+    X(OP_SET_PATH)       /* u16 name, u16 cache, u8 n, u16 jump: [obj value] -> [new struct], or  \
+                            sets obj's field, pops n values and jumps */                          \
+    X(OP_PICK)           /* u8 depth: pushes the value that far below the top */                  \
     X(OP_GET_INDEX)                                                                               \
     X(OP_SLICE)          /* u8 inclusive: [obj lo hi] -> [slice] */                               \
     X(OP_FIELD_UNSET)    /* u16 name: [obj] -> [bool] */                                          \
