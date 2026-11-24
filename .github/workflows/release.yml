@@ -3,21 +3,25 @@ name: Release
 # installers (flywheel.polymorphia.dev/lite-install.sh and lite-install.ps1) can download them
 # instead of needing a C compiler.
 #
-#   git tag v2.13-beta-13 && git push origin v2.13-beta-13
+#   git tag v2.14-beta-14 && git push origin v2.14-beta-14
 #
-# or run it from the Actions tab with a tag name. Tags containing "alpha" are marked as
+# or run it from the Actions tab with a tag name. Pushing a branch named release-check builds and
+# tests everything without publishing. Tags containing "alpha" are marked as
 # pre-releases, which the installers skip (they download releases/latest); beta and gamma
 # tags are normal releases.
 #
 # Assets (the installers rely on these names):
-#   flywheel-lite-linux-x86_64.tar.gz    static (musl), any distribution
-#   flywheel-lite-linux-aarch64.tar.gz   static (musl), any distribution
+#   flywheel-lite-linux-x86_64.tar.gz    glibc 2.28 or newer; loads native C/C++ imports
+#   flywheel-lite-linux-aarch64.tar.gz   the same
+#   flywheel-lite-linux-x86_64-musl.tar.gz    static, any distribution, without native imports
+#   flywheel-lite-linux-aarch64-musl.tar.gz   the same
 #   flywheel-lite-macos-universal.tar.gz Apple silicon and Intel, macOS 11+
 #   flywheel-lite-windows-x86_64.zip     static C runtime, no redistributable needed
 #   SHA256SUMS
 on:
   push:
     tags: ["v*"]
+    branches: [release-check]
   workflow_dispatch:
     inputs:
       tag:
@@ -34,6 +38,10 @@ jobs:
           - target: linux-x86_64
             os: ubuntu-latest
           - target: linux-aarch64
+            os: ubuntu-24.04-arm
+          - target: linux-x86_64-musl
+            os: ubuntu-latest
+          - target: linux-aarch64-musl
             os: ubuntu-24.04-arm
           - target: macos-universal
             os: macos-latest
@@ -53,8 +61,17 @@ jobs:
         with:
           python-version: "3.12"
 
+      # An old glibc, so the executable runs on older distributions too; dynamic, because native
+      # imports load shared libraries.
+      - name: Build (Linux, glibc 2.28)
+        if: runner.os == 'Linux' && !endsWith(matrix.target, '-musl')
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work/flywheel-lite \
+            "quay.io/pypa/manylinux_2_28_$(uname -m)" make
+          sudo chown -R "$(id -u):$(id -g)" flywheel-lite/build
+          file flywheel-lite/build/flywheel-lite
       - name: Build (Linux, static musl)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && endsWith(matrix.target, '-musl')
         working-directory: flywheel-lite
         run: |
           sudo apt-get update
@@ -75,6 +92,10 @@ jobs:
           cmake --build build --config Release
           copy build\Release\flywheel-lite.exe build\flywheel-lite.exe
 
+      - name: Native imports load
+        if: runner.os == 'macOS' || (runner.os == 'Linux' && !endsWith(matrix.target, '-musl'))
+        working-directory: flywheel-lite
+        run: ./build/flywheel-lite tests/cases/native_imports.fw | diff - tests/cases/native_imports.out
       - name: Test
         working-directory: flywheel-lite
         run: python tests/run_tests.py build/flywheel-lite -v
@@ -101,6 +122,7 @@ jobs:
 
   release:
     needs: build
+    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -158,7 +158,7 @@ compiler. Numbers, `bool`, strings, pointers (as `int` handles), and arrays for 
 cross as with the compiler, and the `// flywheel:` directives are followed. `--check` only reads the
 source. Differences:
 
-- Statically linked builds (the prebuilt Linux executables) cannot load native code; build from source.
+- Statically linked builds (the prebuilt `-musl` executables) cannot load native code; build from source.
 - Functions that take or return C structs by value or take function pointers are not exposed.
 - Arrays are copied into a C block for the call (and back, unless the pointer is to `const`). An
   array passed for a `void *` is laid out by its values: `double` for numbers with fractions, 64-bit
