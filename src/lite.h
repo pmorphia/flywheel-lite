@@ -31,7 +31,7 @@
 #include <string.h>
 
 #define LITE_VERSION "2.13 (beta-13)"
-#define LITE_LANGUAGE "2.26"
+#define LITE_LANGUAGE "2.28"
 
 #if defined(__GNUC__) || defined(__clang__)
 #define TB_NORETURN __attribute__((noreturn))
@@ -441,6 +441,7 @@ struct VM {
     Obj *objects;
     size_t bytes_allocated, next_gc;
     int gc_off;
+    bool test_mode;  /* --test: the main module runs its __fw_run_tests (main.c) */
     bool check_only; /* `check`: native imports are read, not built */
     bool gc_paused; /* gc.pause(): no automatic collections */
     int64_t gc_threshold;

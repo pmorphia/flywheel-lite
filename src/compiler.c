@@ -2823,6 +2823,25 @@ ObjFunction *compile_module(VM *vm, ObjModule *module, const char *source, size_
     C->prog = &prog;
     if (setjmp(C->jmp))
         goto done;
+    if (vm->test_mode && vm->main_path && !strcmp(path, vm->main_path)) {
+        /* before the first top-level return, so a program that returns a value tests first */
+        for (int i = 0; i < prog.nfunctions; i++) {
+            if (strcmp(prog.functions[i].name, "__fw_run_tests"))
+                continue;
+            int at = 0;
+            while (at < prog.body.count && prog.body.items[at]->kind != S_RETURN)
+                at++;
+            Node here;
+            memset(&here, 0, sizeof here);
+            here.line = prog.functions[i].line;
+            here.col = 1;
+            Node *call = synth(C, N_CALL, "", &here), *st = synth(C, S_EXPR, NULL, &here);
+            nl_push(C->arena, &call->args, synth(C, N_NAME, "__fw_run_tests", &here));
+            st->target = call;
+            nl_insert(C->arena, &prog.body, at, st);
+            break;
+        }
+    }
     process_imports(C);
     if (!lower_module_units(C))
         goto done;

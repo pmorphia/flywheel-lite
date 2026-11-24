@@ -39,7 +39,7 @@ add_custom_command(
 file(GLOB LITE_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.c")
 add_executable(flywheel-lite ${LITE_SOURCES} "${embedded}")
 target_include_directories(flywheel-lite PRIVATE src)
-# `flywheel-lite selftest` runs the test harness from this checkout.
+# `flywheel-lite --selftest` runs the test harness from this checkout.
 target_compile_definitions(flywheel-lite PRIVATE "LITE_TEST_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/tests\"")
 
 if(MSVC)

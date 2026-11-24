@@ -6,7 +6,7 @@ output. Where the compiler builds a native executable through LLVM, Flywheel Lit
 bytecode in memory and runs it straight away.
 
 Flywheel Lite is currently in its **beta** phase: version **2.13 (beta-13)**, following Flywheel
-2.26 (`flywheel-lite --version`).
+2.28 (`flywheel-lite --version`).
 
 Why it exists:
 
@@ -19,7 +19,7 @@ Why it exists:
 ```sh
 flywheel-lite hello.fw
 flywheel-lite run app.fw -- one two      # program arguments after --
-flywheel-lite -s 'print 6 * 7'
+flywheel-lite -x 'print 6 * 7'
 fwl hello.fw                       # fwl is a short alias for flywheel-lite
 ```
 
@@ -55,33 +55,35 @@ so the installed binary is self-contained. `make debug` builds with AddressSanit
 
 ## Usage
 
-The command line follows the Flywheel compiler's:
+The command line follows the Flywheel compiler's: every command is a flag, and without a mode flag
+SOURCE is run.
 
-| Command | Effect |
+| Flag | Effect |
 |---|---|
-| `flywheel-lite run SOURCE [options] [-- ARGS...]` / `flywheel-lite SOURCE [ARGS...]` | run a program; a top-level `return n` exits with status `n` |
-| `flywheel-lite check SOURCE` | parse and compile without running |
-| `flywheel-lite export SOURCE OUTPUT` / `-o OUTPUT` | run, then write the top-level return value to `OUTPUT` |
-| `flywheel-lite debug SOURCE [-- ARGS...]` | run, then print the top-level return value and the CPU time |
-| `flywheel-lite test [files or directories]` | run `test_*.fw` and `*_test.fw` files like `flywheel test`, with the same `setup`/`teardown`/`setup_all`/`teardown_all` fixtures and output |
-| `flywheel-lite disasm SOURCE` | print the compiled bytecode |
-| `flywheel-lite repl` | interactive session; a trailing expression's value is printed |
-| `flywheel-lite selftest` | run this checkout's test suite (needs Python 3) |
-| `flywheel-lite --error SOURCE` / `-E SOURCE` | print the last error SOURCE stopped with: its message and locations, without the source lines |
+| `-r`, `--run` | run a program (the default); a top-level `return n` exits with status `n` |
+| `-c`, `--check` | parse and compile without running |
+| `-e`, `--export` | run, then write the top-level return value to `-o OUTPUT` or the next argument |
+| `-D`, `--debug` | run, then print the top-level return value and the CPU time |
+| `-t`, `--test` | alone, run `test_*.fw` and `*_test.fw` files like `flywheel --test`, with the same `setup`/`teardown`/`setup_all`/`teardown_all` fixtures and output; with another mode or `-x`, run the program's `test_*` functions before its first top-level `return` |
+| `-n NAME`, `--new NAME` | create a project with Pulley (`--game`: a game) |
+| `--disasm` | print the compiled bytecode |
+| `--repl` | interactive session; a trailing expression's value is printed |
+| `--selftest` | run this checkout's test suite (needs Python 3) |
+| `-E SOURCE`, `--error SOURCE` | print the last error SOURCE stopped with: its message and locations, without the source lines |
+| `-u`, `--update` | reinstall from flywheel.polymorphia.dev, then carry on with the rest of the command line |
+| `-v`, `--version` / `-h`, `--help` | print the version / the usage |
+| `-x CODE`, `--source CODE` | run CODE instead of SOURCE (diagnostics name it `<source>`) |
+| `-o FILE`, `--output FILE` | output file (export) |
 
-`fwl` is a short alias for `flywheel-lite` (`fwl hello.fw`, `fwl repl`); `make install` and
-`cmake --install` create it next to the executable.
-
-Commands have the compiler's short aliases: `r` (run), `c` (check), `e` (export), `db` (debug),
-`t` (test), and `u` (update); `help`/`h`/`-h`/`--help` print the usage and
-`version`/`v`/`-v`/`--version` the version (`fwl v`).
+Short flags combine and may come before or after SOURCE (`fwl main.fw -vt`); `-u`, `-v`, and `-h` run
+first, in that order. Program arguments that start with `-` go after `--`. The old command words
+(`flywheel-lite run app.fw`) are reported with the flag to use instead. `fwl` is a short alias for
+`flywheel-lite`; `make install` and `cmake --install` create it next to the executable.
 
 SOURCE is a `.fw`/`.fly` path, a directory (which runs its `source.fw`), or `-` for standard
-input. `-s CODE`, `--source CODE`, or
-`--source=CODE` in place of SOURCE runs code from the command line (diagnostics name it
-`<source>`); like every option, it can appear anywhere before `--`. `-O0`..`-O3` and `-g` are
-accepted and ignored, so compiler command lines work unchanged. `build`, `desktop`, `serve`,
-`format` (`fmt`), `doc`, `lsp`, and `test --coverage`/`--race` need the Flywheel compiler and say so.
+input. `-O0`..`-O3`, `-g`, and `--hot` are accepted without effect. `--build`, `--desktop`, `--serve`,
+`--format`, `--doc`, `--lsp`, `--coverage`, `--race`, and `--emit-ir` need the Flywheel compiler and
+say so.
 
 Errors use the compiler's formats, with exit status 1: `file:line:col: error: ...` for compile
 errors, and `Flywheel runtime error: Type: message` followed by a traceback for uncaught errors.
@@ -106,7 +108,7 @@ Flywheel runtime error: NumericError: integer division by zero
 The last error of each source file is kept in `$XDG_STATE_HOME/flywheel-lite/errors` (by default
 `~/.local/state`; `%LOCALAPPDATA%` on Windows), so `fwl -E main.fw` prints it again later, with
 the time it happened, for example after a program cleared the terminal. The record holds the
-message and locations only, never the source. `-s` code and standard input are not recorded.
+message and locations only, never the source. `-x` code and standard input are not recorded.
 
 ## What runs
 
@@ -154,9 +156,10 @@ backend, such as Aperture, run. The first run builds the source with the system 
 or `$CC`/`$CXX`) into `$XDG_CACHE_HOME/flywheel-lite/native` (by default `~/.cache`); it is rebuilt when
 the source, or a file it includes with quotes, changes. Programs without native imports still need no
 compiler. Numbers, `bool`, strings, pointers (as `int` handles), and arrays for pointer parameters
-cross as with the compiler, and the `// flywheel:` directives are followed. `check` only reads the
+cross as with the compiler, and the `// flywheel:` directives are followed. `--check` only reads the
 source. Differences:
 
+- Statically linked builds (the prebuilt Linux executables) cannot load native code; build from source.
 - Functions that take or return C structs by value or take function pointers are not exposed.
 - Arrays are copied into a C block for the call (and back, unless the pointer is to `const`). An
   array passed for a `void *` is laid out by its values: `double` for numbers with fractions, 64-bit
@@ -171,7 +174,7 @@ there is no static type checker. So:
 
 - Programs the compiler rejects can run under Flywheel Lite until they reach the problem: type
   mismatches surface as `TypeError` when executed, a non-exhaustive `match` raises `MatchError`
-  only if no case applies, and missing returns yield `null`. Use `flywheel check` to validate.
+  only if no case applies, and missing returns yield `null`. Use `flywheel --check` to validate.
 - Unit mistakes the compiler rejects (`100m + 10s`, a plain number where a quantity is
   declared, a product with no `unitconv`) raise `TypeError` when executed, with the compiler's
   wording. Quantity operators dispatch at run time to the hidden unit classes.
@@ -201,7 +204,7 @@ there is no static type checker. So:
   are skipped and counted);
 - Flywheel Lite's own cases in `tests/cases`, whose expected output was produced by the Flywheel compiler.
 
-Current result on Linux: 219 of 229 pass; the 10 others are the known differences above.
+Every failure on Linux is one of the known differences above.
 `LITE_GC_STRESS=1` collects at every safepoint, which together with `make debug` checks that
 the runtime roots every live value.
 

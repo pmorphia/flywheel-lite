@@ -155,11 +155,15 @@ def main():
             stdin = src.with_suffix(".in").read_text(encoding="utf-8") if src.with_suffix(".in").exists() else None
             r = subprocess.run([lite, str(src)], cwd=src.parent, input=stdin, capture_output=True, text=True,
                                encoding="utf-8", errors="replace", timeout=60)
+            if "is statically linked and cannot load native code" in r.stderr:
+                skipped += 1
+                skips["native import"] = skips.get("native import", 0) + 1
+                continue
             ok = r.returncode == code and r.stdout == expected and (err is None or err in r.stderr)
             check(name, ok, f"exit {r.returncode} (want {code})\n--- expected\n{expected}--- got\n{r.stdout}--- stderr\n{r.stderr}")
 
     if only in (None, "cli"):
-        # Command-line behaviour shared with the Flywheel compiler: --source anywhere, -o, test.
+        # Command-line behaviour shared with the Flywheel compiler: every command is a flag.
         def cli(*args, cwd=None):
             return subprocess.run([lite, *args], cwd=cwd, capture_output=True, text=True,
                                   encoding="utf-8", errors="replace", timeout=60)
@@ -180,26 +184,39 @@ def main():
                 "function test_good() returns void\n    testing.assert(true)\nend\n", encoding="utf-8")
             (suite_dir / "build" / "test_skipped.fw").write_text("throw ValueError(\"ran\")\n", encoding="utf-8")
             cases = [
-                ("short", ["-s", "print 6 * 7"], 0, "42\n"),
+                ("short", ["-x", "print 6 * 7"], 0, "42\n"),
+                ("attached", ["-xprint 6 * 7"], 0, "42\n"),
                 ("long", ["--source", "print 6 * 7"], 0, "42\n"),
                 ("equals", ["--source=print 6 * 7"], 0, "42\n"),
-                ("run_after_options", ["run", "-O2", "-g", "--source", "print 1"], 0, "1\n"),
-                ("run_arguments", ["run", "-s", argv_code, "--", "a", "-b"], 0, "[\"a\", \"-b\"]\n"),
+                ("run_after_options", ["-r", "-O2g", "--source", "print 1"], 0, "1\n"),
+                ("run_arguments", ["--run", "-x", argv_code, "--", "a", "-b"], 0, "[\"a\", \"-b\"]\n"),
                 ("implicit_arguments", ["--source", argv_code, "x"], 0, "[\"x\"]\n"),
-                ("export_o", ["export", "-s", "return [1, 2]", "-o", str(out)], 0, ""),
-                ("check_error", ["check", "-s", "print 1 +"], 1, ""),
-                ("unknown_option", ["run", "--bogus", "x.fw"], 2, ""),
-                ("compiler_only", ["build", "x.fw"], 2, ""),
-                ("alias_run", ["r", "-s", "print 6 * 7"], 0, "42\n"),
-                ("alias_check", ["c", "-s", "print 1"], 0, ""),
-                ("alias_compiler_only", ["f", "x.fw"], 2, ""),
-                ("alias_version", ["v"], 0, None),
-                ("alias_help", ["h"], 0, None),
-                ("test", ["test", str(suite_dir)], 1,
+                ("export_o", ["-e", "-x", "return [1, 2]", "-o", str(out)], 0, ""),
+                ("export_missing", ["-e", "-x", "return 1"], 2, None),
+                ("check", ["-c", "-x", "print 1"], 0, ""),
+                ("check_error", ["--check", "-x", "print 1 +"], 1, ""),
+                ("check_extra", ["-c", str(suite_dir / "test_ok.fw"), "extra"], 2, ""),
+                ("combined_modes", ["-ce", "-x", "print 1"], 2, ""),
+                ("version_then_run", ["-v", "-x", "print 1"], 0, None),
+                ("version", ["--version"], 0, None),
+                ("help", ["-h"], 0, None),
+                ("no_arguments", [], 2, ""),
+                ("unknown_option", ["--bogus", "x.fw"], 2, ""),
+                ("unknown_short", ["-z", "x.fw"], 2, ""),
+                ("compiler_only", ["--build", "x.fw"], 2, ""),
+                ("compiler_only_short", ["-s", "x.fw"], 2, ""),
+                ("old_command", ["run", "x.fw"], 2, ""),
+                ("old_alias", ["db", "x.fw"], 2, ""),
+                ("pulley", ["pull"], 2, ""),
+                ("test_mode_returns", ["-t", "-x", "function test_a()\n    print \"ran\"\nend\nprint 1\nreturn 3"], 3,
+                 "1\nran\n  ok   test_a\n"),
+                ("test_mode_fails", ["-te", "-x", "function test_a()\n    throw \"Bad\"\nend\nreturn 3",
+                                     "-o", str(tmp / "never.txt")], 1, None),
+                ("test", ["--test", str(suite_dir)], 1,
                  f"{suite_dir / 'nested' / 'math_test.fw'}\n"
                  "  FAIL test_bad: assertion failed: product: expected 5, got 4\n  ok   test_good\n"
                  f"{suite_dir / 'test_ok.fw'}\nsetup\n  ok   test_add\n2 test file(s), 1 failed\n"),
-                ("test_file", ["test", str(suite_dir / "test_ok.fw")], 0, None),
+                ("test_file", ["--test", str(suite_dir / "test_ok.fw")], 0, None),
             ]
             for n, args, code, expected in cases:
                 name = f"cli/{n}"
@@ -212,6 +229,12 @@ def main():
                     ok = ok and out.exists() and out.read_text(encoding="utf-8") == "[1, 2]"
                 if n == "check_error":
                     ok = ok and r.stderr.startswith("<source>:1:")
+                if n == "old_command":
+                    ok = ok and "commands are flags now: use `flywheel-lite --run`" in r.stderr
+                if n == "version_then_run":
+                    ok = ok and r.stdout.startswith("flywheel-lite ") and r.stdout.endswith(")\n1\n")
+                if n == "test_mode_fails":
+                    ok = ok and not (tmp / "never.txt").exists()
                 check(name, ok, f"exit {r.returncode} (want {code})\n--- expected\n{expected}--- got\n"
                                 f"{r.stdout}--- stderr\n{r.stderr}")
 

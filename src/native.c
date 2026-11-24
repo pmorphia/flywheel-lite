@@ -704,6 +704,8 @@ static bool build(Foreign *m, const char *text, size_t len, CompileError *err) {
     void *handle = dlopen(lib, RTLD_NOW | RTLD_LOCAL);
     if (!handle) {
         const char *why = dlerror();
+        if (why && strstr(why, "Dynamic loading not supported")) /* musl's dlopen in a static program */
+            why = "this flywheel-lite is statically linked and cannot load native code; build it from source";
         snprintf(err->message, sizeof err->message, "cannot load %.300s: %.600s", m->path, why ? why : "unknown error");
         return false;
     }
