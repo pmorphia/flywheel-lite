@@ -30,7 +30,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define LITE_VERSION "2.13 (beta-13)"
+#define LITE_VERSION "2.14 (beta-14)"
 #define LITE_LANGUAGE "2.28"
 
 #if defined(__GNUC__) || defined(__clang__)
