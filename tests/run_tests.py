@@ -75,8 +75,11 @@ def run(lite, source, cwd, stdin=None, args=()):
     path = Path(cwd) / "program.fw"
     path.write_text(source, encoding="utf-8")
     try:
-        return subprocess.run([lite, str(path), *args], cwd=cwd, input=stdin, capture_output=True,
-                              text=True, encoding="utf-8", errors="replace", timeout=20)
+        r = subprocess.run([lite, str(path), *args], cwd=cwd, input=stdin, capture_output=True,
+                           text=True, encoding="utf-8", errors="replace", timeout=20)
+        if sys.platform == "darwin":  # /tmp is a link to /private/tmp
+            r.stdout = r.stdout.replace("/private/tmp", "/tmp")
+        return r
     except subprocess.TimeoutExpired:
         return None
 
