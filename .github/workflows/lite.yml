@@ -37,7 +37,7 @@ jobs:
           copy build\Release\flywheel-lite.exe build\flywheel-lite.exe
       - name: Test
         working-directory: flywheel-lite
-        run: python tests/run_tests.py build/flywheel-lite
+        run: python tests/run_tests.py build/flywheel-lite -v
       - name: GC stress
         if: runner.os != 'Windows'
         working-directory: flywheel-lite

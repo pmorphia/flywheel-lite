@@ -77,7 +77,7 @@ jobs:
 
       - name: Test
         working-directory: flywheel-lite
-        run: python tests/run_tests.py build/flywheel-lite
+        run: python tests/run_tests.py build/flywheel-lite -v
 
       - name: Package (Linux, macOS)
         if: runner.os != 'Windows'
