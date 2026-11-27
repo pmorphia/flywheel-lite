@@ -747,7 +747,8 @@ static uint8_t binary_op(const char *op) {
         uint8_t op;
     } ops[] = {{"+", OP_ADD}, {"-", OP_SUB}, {"*", OP_MUL}, {"/", OP_DIV}, {"//", OP_IDIV},
                {"%", OP_MOD}, {"==", OP_EQ}, {"!=", OP_NE}, {"<", OP_LT}, {"<=", OP_LE},
-               {">", OP_GT},  {">=", OP_GE}, {"in", OP_IN}, {NULL, 0}};
+               {">", OP_GT},  {">=", OP_GE}, {"in", OP_IN}, {":", OP_COLON}, {"**", OP_POW},
+               {NULL, 0}};
     for (int i = 0; ops[i].s; i++)
         if (!strcmp(ops[i].s, op))
             return ops[i].op;
@@ -824,11 +825,49 @@ static void emit_receiver(Compiler *C, int line) {
         emit2(C, OP_GET_LOCAL, (uint8_t)s);
 }
 
+/* Pushes a public name of the prelude (stdlib/fw/_prelude.fw), such as __slice_of. */
+static void emit_prelude(Compiler *C, const char *name, int line) {
+    ObjModule *m = C->vm->prelude;
+    int slot = m ? module_find(m, str_intern_c(C->vm, name)) : -1;
+    if (slot < 0)
+        cfail(C, line, "internal: the prelude has no '%s'", name);
+    emit(C, OP_GET_MGLOBAL);
+    emit16(C, make_const(C, val_obj(m)));
+    emit16(C, slot);
+}
 static void emit_type_value(Compiler *C, const char *type, int line);
 static void compile_call(Compiler *C, Node *e) {
     Node *callee = e->args.items[0];
     int argc = e->args.count - 1;
     ObjModule *mod;
+    int named = 0;
+    for (int i = 1; i < e->args.count; i++)
+        if (e->args.items[i]->kind == N_NAMED)
+            named++;
+    if (named) {
+        /* `f(1, step=2)`: the callee's parameter names place the named arguments (vm.c). */
+        if (callee->kind == N_MEMBER && !callee->grouped && callee->args.items[0]->kind == N_SUPER)
+            cfail(C, e->line, "super calls take positional arguments only");
+        compile_expr(C, callee);
+        C->vm->gc_off++;
+        ObjList *names = new_list(C->vm, OBJ_TUPLE, named);
+        for (int i = 1; i < e->args.count; i++) {
+            Node *a = e->args.items[i];
+            if (a->kind == N_NAMED) {
+                names->items[names->count++] = val_obj(str_intern_c(C->vm, a->text));
+                compile_expr(C, a->args.items[0]);
+            } else
+                compile_expr(C, a);
+        }
+        int k = make_const(C, val_obj(names));
+        C->vm->gc_off--;
+        if (argc > 255)
+            cfail(C, e->line, "too many arguments");
+        emit2(C, OP_CALL_NAMED, (uint8_t)argc);
+        emit16(C, k);
+        emit(C, (uint8_t)named);
+        return;
+    }
     Node *chosen = callee->kind == N_MEMBER && !callee->grouped ? callee->args.items[0] : NULL;
     if (chosen && chosen->kind == N_MEMBER && chosen->args.items[0]->kind == N_SUPER &&
         (isupper((unsigned char)chosen->text[0]) || !strcmp(callee->text, "init"))) {
@@ -1276,10 +1315,29 @@ static void compile_expr(Compiler *C, Node *e) {
     case N_UNITLIT:
         compile_quantity(C, e);
         break;
+    case N_NAMED:
+        cfail(C, e->line, "named arguments (%s=...) work in calls of functions, methods, and constructors", e->text);
+    case N_SLICE:
+    case N_OMITTED:
+        cfail(C, e->line, "a slice with parts left out (xs[a:], xs[:b]) is written only inside brackets%s", "");
     case N_INDEX: {
         Node *key = e->args.items[1];
         compile_expr(C, e->args.items[0]);
-        if (is_range(key)) {
+        if (key->kind == N_SLICE) {
+            /* xs[a:b:step], parts left out: __slice_of(a, b, step, open_start, open_stop) */
+            emit_prelude(C, "__slice_of", e->line);
+            for (int i = 0; i < 3; i++) {
+                Node *part = key->args.items[i];
+                if (part->kind == N_OMITTED)
+                    emit_int(C, i == 2 ? 1 : 0);
+                else
+                    compile_expr(C, part);
+            }
+            emit(C, key->args.items[0]->kind == N_OMITTED ? OP_TRUE : OP_FALSE);
+            emit(C, key->args.items[1]->kind == N_OMITTED ? OP_TRUE : OP_FALSE);
+            emit2(C, OP_CALL, 5);
+            emit(C, OP_GET_INDEX);
+        } else if (is_range(key)) {
             compile_expr(C, key->args.items[0]);
             compile_expr(C, key->args.items[1]);
             emit2(C, OP_SLICE, !strcmp(key->text, "..") ? 1 : 0);
@@ -2263,6 +2321,14 @@ static ObjFunction *compile_function(Compiler *C, FuncDecl *f, bool method, bool
     fn->name = str_intern_c(C->vm, f->name ? f->name : "lambda");
     fn->arity = f->nparams;
     fn->required = 0;
+    {
+        C->vm->gc_off++;
+        ObjList *names = new_list(C->vm, OBJ_TUPLE, f->nparams > 0 ? f->nparams : 1);
+        for (int i = 0; i < f->nparams; i++)
+            names->items[names->count++] = val_obj(str_intern_c(C->vm, f->params[i].name));
+        fn->param_names = val_obj(names);
+        C->vm->gc_off--;
+    }
     for (int i = 0; i < f->nparams; i++)
         if (!f->params[i].value)
             fn->required = i + 1;
@@ -2604,6 +2670,37 @@ static void process_imports(Compiler *C) {
                 }
                 add_wild(C, w);
             }
+        }
+    }
+    /* The built-in vector2/3/4 and slice types: the prelude's public names, wherever the module
+       has no declaration, import, or wildcard name of its own by that name. */
+    if (p->uses_prelude && !(C->path && strstr(C->path, "<library _prelude>"))) {
+        CompileError sub;
+        memset(&sub, 0, sizeof sub);
+        bool unused;
+        ObjModule *m = vm_load_module(C->vm, "_prelude", C->path, &unused, &sub);
+        if (!m)
+            cfail(C, 1, "%s", sub.message);
+        C->vm->prelude = m;
+        add_alias(C, "$prelude", m);
+        for (int s = 0; s < m->names_by_slot.count; s++) {
+            if (m->is_private && m->is_private[s])
+                continue;
+            ObjString *nm = AS_STRING(m->names_by_slot.items[s]);
+            if (nm->chars[0] == '$')
+                continue;
+            bool taken = find_alias(C, nm->chars) != NULL;
+            for (int k = 0; k < C->nwilds && !taken; k++)
+                taken = !strcmp(C->wilds[k].name, nm->chars);
+            if (taken)
+                continue;
+            Wild w;
+            memset(&w, 0, sizeof w);
+            w.name = arena_strndup(C->arena, nm->chars, (size_t)nm->len);
+            w.from = m;
+            w.module = m;
+            w.slot = s;
+            add_wild(C, w);
         }
     }
 }

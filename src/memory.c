@@ -165,6 +165,7 @@ ObjMap *new_map(VM *vm, ObjType type) { return ALLOC_OBJ(vm, ObjMap, type); }
 ObjFunction *new_function(VM *vm) {
     ObjFunction *f = ALLOC_OBJ(vm, ObjFunction, OBJ_FUNCTION);
     chunk_init(&f->chunk);
+    f->param_names = val_null();
     return f;
 }
 ObjClosure *new_closure(VM *vm, ObjFunction *fn) {
@@ -582,6 +583,7 @@ static void blacken(VM *vm, Obj *o) {
         mark_obj(vm, (Obj *)f->name);
         mark_obj(vm, (Obj *)f->module);
         mark_obj(vm, (Obj *)f->owner);
+        mark_val(vm, f->param_names);
         mark_array(vm, &f->chunk.constants);
         break;
     }

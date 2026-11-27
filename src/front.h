@@ -19,6 +19,7 @@ bool lx_html_void(const char *tag, size_t n);
 /* HTML void elements and the void components (`void component Icon = ...`) of the source being
  * parsed: `<Icon>` needs no `/>` or closing tag. */
 bool lx_void_tag(const char *tag, size_t n);
+bool lx_vector_tag(const char *tag, size_t n); /* vector2, vector3, vector4 */
 typedef struct {
     const char **names;
     int count;
@@ -69,6 +70,9 @@ typedef enum {
     N_TERNARY, /* `x if c else y`: args are c, x, y */
     N_SPAWN,   /* `spawn call`: fn is a no-parameter lambda running the call */
     N_MATCH,   /* match expression: fn is a no-parameter lambda whose body is the match */
+    N_NAMED,   /* `name=value` call argument: text is the name, args[0] the value */
+    N_SLICE,   /* `x[a:b:step]` subscript: three args, N_OMITTED where a part is left out */
+    N_OMITTED, /* a slice part left out */
     /* statements */
     S_EXPR,
     S_DECLARE,
@@ -224,6 +228,8 @@ typedef struct {
     int nunitns, capunitns;
     UnitConv *unitconvs;
     int nunitconvs, capunitconvs;
+    /* Uses the built-in vector2/3/4 and slice types (stdlib/fw/_prelude.fw); see Parser. */
+    bool uses_prelude;
 } Program;
 
 typedef struct {
@@ -238,6 +244,10 @@ typedef struct {
     NodeList pending;
     bool no_ternary; /* case patterns: `if` starts the guard */
     bool match_arrows; /* the cases being parsed are a match expression's: `case p => value` */
+    /* Map literal keys and subscript slice parts end at ':' instead of reading `a:b`. */
+    bool colon_stop;
+    /* The source names vector2/3/4 or slice, or writes `a:b` or `**`: the prelude is loaded. */
+    bool uses_prelude;
     jmp_buf *jmp;
     CompileError *err;
     int line_offset;

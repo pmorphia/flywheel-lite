@@ -19,7 +19,7 @@ LDLIBS  ?= $(if $(filter Linux,$(shell uname -s)),-ldl)
 WARN    := -Wall -Wextra -Wno-unused-parameter
 SOURCES := $(wildcard src/*.c)
 HEADERS := $(wildcard src/*.h)
-LIBMODS := csv url log args bigint decimal random metric imperial vecmath _time cogwheel
+LIBMODS := csv url log args bigint decimal random metric imperial vecmath _time cogwheel _prelude
 LIBSRC  := $(foreach m,$(LIBMODS),$(STDLIB)/$(m).fw)
 
 all: $(BUILD)/flywheel-lite

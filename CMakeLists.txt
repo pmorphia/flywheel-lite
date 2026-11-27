@@ -18,7 +18,7 @@ endif()
 set(FLYWHEEL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.." CACHE PATH "Flywheel checkout")
 set(LITE_STDLIB_DIR "${FLYWHEEL_DIR}/stdlib/fw" CACHE PATH
     "Directory holding the Flywheel library modules embedded into flywheel-lite")
-set(LITE_LIBRARY_MODULES csv url log args bigint decimal random metric imperial vecmath _time cogwheel)
+set(LITE_LIBRARY_MODULES csv url log args bigint decimal random metric imperial vecmath _time cogwheel _prelude)
 
 # The library modules written in Flywheel are compiled into the executable as text.
 add_executable(lite_embed tools/embed.c)

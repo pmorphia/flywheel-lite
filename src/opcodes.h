@@ -45,6 +45,8 @@
     X(OP_GT)                                                                                      \
     X(OP_GE)                                                                                      \
     X(OP_IN)                                                                                      \
+    X(OP_COLON)          /* a:b: a slice of integers, or operator : */                            \
+    X(OP_POW)            /* a ** b */                                                             \
     X(OP_CHAIN)          /* u8 comparison opcode: [a b] -> [b bool] */                            \
     X(OP_RANGE)          /* u8 inclusive */                                                       \
     X(OP_IS)             /* u16 type */                                                           \
@@ -58,6 +60,7 @@
     X(OP_JUMP_NOT_NULL)  /* u16: non-null keeps and jumps, else pops */                           \
     X(OP_LOOP)           /* u16 backward */                                                       \
     X(OP_CALL)           /* u8 argc */                                                            \
+    X(OP_CALL_NAMED)     /* u8 argc, u16 names (tuple), u8 named: the last `named` args by name */ \
     X(OP_INVOKE)         /* u16 name, u8 argc, u16 cache */                                       \
     X(OP_SUPER_INVOKE)   /* u16 name, u8 argc */                                                  \
     X(OP_SUPER_GET)      /* u16 name */                                                           \

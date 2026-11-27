@@ -96,6 +96,31 @@ static char *current_dir(void) {
 #endif
     return xstrdup(buf);
 }
+bool lib_each_entry(const char *dir, void (*fn)(const char *name, void *ctx), void *ctx) {
+#ifdef _WIN32
+    char pattern[4096];
+    snprintf(pattern, sizeof pattern, "%s\\*", dir);
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE)
+        return false;
+    do {
+        if (strcmp(fd.cFileName, ".") && strcmp(fd.cFileName, ".."))
+            fn(fd.cFileName, ctx);
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+#else
+    DIR *d = opendir(dir);
+    if (!d)
+        return false;
+    struct dirent *e;
+    while ((e = readdir(d)))
+        if (strcmp(e->d_name, ".") && strcmp(e->d_name, ".."))
+            fn(e->d_name, ctx);
+    closedir(d);
+#endif
+    return true;
+}
 /* Sorted directory entries (without . and ..). */
 static ObjList *list_dir(VM *vm, const char *path, bool *ok) {
     ObjList *l = new_list(vm, OBJ_ARRAY, 0);

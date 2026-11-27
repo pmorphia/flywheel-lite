@@ -91,8 +91,12 @@ VoidComponents lx_set_void_components(VoidComponents set) {
     void_components = set;
     return saved;
 }
+/* `<vector3 x=1 y=2 z=3>` is a vector value, written like a void element. */
+bool lx_vector_tag(const char *tag, size_t n) {
+    return n == 7 && memcmp(tag, "vector", 6) == 0 && tag[6] >= '2' && tag[6] <= '4';
+}
 bool lx_void_tag(const char *tag, size_t n) {
-    if (lx_html_void(tag, n))
+    if (lx_html_void(tag, n) || lx_vector_tag(tag, n))
         return true;
     for (int i = 0; i < void_components.count; i++)
         if (strlen(void_components.names[i]) == n && memcmp(void_components.names[i], tag, n) == 0)
@@ -372,7 +376,8 @@ static bool lex_text(Arena *arena, const char *src, size_t len, TokenList *out, 
                 Token *last = &out->items[out->count - 1];
                 static const char *joins[] = {"+",  "-",  "*",  "/",  "//", "%",  "==", "!=",
                                               "<=", ">=", "=",  "+=", "-=", "*=", "/=", "//=",
-                                              "%=", "..", "..<", ",", "=>", NULL};
+                                              "%=", "..", "..<", ",", "=>", "**", "**=", ".=",
+                                              NULL};
                 bool join = false;
                 if (last->kind == T_OP)
                     for (int i = 0; joins[i]; i++)
@@ -493,19 +498,38 @@ static bool lex_text(Arena *arena, const char *src, size_t len, TokenList *out, 
             L.expected = false;
             continue;
         }
+        /* `x++` and `x--` (after a name, `)` or `]`, ending the statement) and `++x` / `--x`
+           (starting a statement) are increments; elsewhere `--` stays two minus signs (`a--b`). */
+        if ((c == '+' || c == '-') && L.p + 1 < n && s[L.p + 1] == c) {
+            char after = L.p + 2 < n ? s[L.p + 2] : '\n';
+            bool ends = after == ' ' || after == '\t' || after == '\r' || after == '\n' ||
+                        after == ';' || after == '#';
+            Token *last = out->count ? &out->items[out->count - 1] : NULL;
+            bool postfix = last && !L.expected && ends && L.p > 0 && s[L.p - 1] != ' ' &&
+                           s[L.p - 1] != '\t' &&
+                           (last->kind == T_ID || tok_is(last, ")") || tok_is(last, "]"));
+            size_t al;
+            bool prefix = (!last || last->kind == T_NL || tok_is(last, "do") || tok_is(last, "else")) &&
+                          L.p + 2 < n && lx_letter_scalar(lx_scalar_at(s, n, L.p + 2, &al));
+            if (postfix || prefix) {
+                emit(&L, T_OP, s + L.p, 2, L.p + 2);
+                L.expected = false;
+                continue;
+            }
+        }
         size_t oplen = 1;
-        if (L.p + 3 <= n && memcmp(s + L.p, "//=", 3) == 0)
+        if (L.p + 3 <= n && (memcmp(s + L.p, "//=", 3) == 0 || memcmp(s + L.p, "**=", 3) == 0))
             oplen = 3;
         else if (L.p + 1 < n) {
             static const char *two[] = {"==", "!=", "<=", ">=", "+=", "-=", "*=", "/=",
-                                        "%=", "//", "..", "=>", "??", NULL};
+                                        "%=", "//", "..", "=>", "??", ".=", "**", NULL};
             for (int i = 0; two[i]; i++)
                 if (s[L.p] == two[i][0] && s[L.p + 1] == two[i][1])
                     oplen = 2;
         }
         if (oplen == 2 && s[L.p] == '.' && L.p + 2 < n && s[L.p + 2] == '<')
             oplen = 3;
-        if (!strchr("+-*/%=!<>()[]{}.,?:", c) || c == 0)
+        if (!strchr("+-*/%=!<>()[]{}.,?:@", c) || c == 0)
             lfail(&L, "invalid character");
         if (c == '(' || c == '[' || c == '{')
             L.group++;

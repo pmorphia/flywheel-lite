@@ -48,7 +48,7 @@ Elsewhere, point at the Flywheel checkout with `make FLYWHEEL_DIR=/path/to/flywh
 through to `make test`), `cmake -DFLYWHEEL_DIR=/path/to/flywheel`, or the `FLYWHEEL_DIR`
 environment variable for `tests/run_tests.py`.
 
-The library modules written in Flywheel (`csv`, `url`, `log`, `args`, `bigint`, `decimal`, `random`, `metric`, `imperial`, `cogwheel`, `vecmath`, and `_time`, the time units behind `import time`) are
+The library modules written in Flywheel (`csv`, `url`, `log`, `args`, `bigint`, `decimal`, `random`, `metric`, `imperial`, `cogwheel`, `vecmath`, `_time`, the time units behind `import time`, and `_prelude`, the built-in vector and slice types) are
 embedded into the executable from `$FLYWHEEL_DIR/stdlib/fw` at build time by a small helper (`tools/embed.c`),
 so the installed binary is self-contained. `make debug` builds with AddressSanitizer and UBSan.
 
@@ -113,14 +113,15 @@ message and locations only, never the source. `-x` code and standard input are n
 
 The whole core language: declarations and `const`, numeric rules (checked 64-bit overflow, `/`
 and `//`, `%`), chained comparisons, `otherwise` (the null fallback, formerly `??`), ranges and slices, parentheses-free calls, string
-interpolation with format specs, functions with defaults, closures with shared captures and
+interpolation with format specs, functions with defaults and named arguments (`f(1, step=2)`), closures with shared captures and
 fresh per-iteration loop bindings, classes with generated constructors and `init`, inheritance
 and `super`, interfaces, operator methods, `to_string`, `hash`/`equals` keys, the iterator
 protocol, enums and enums with data, `match` with every pattern form (values, ranges, enum
 members, types, `ok`/`error`, destructuring, guards), destructuring declarations, generics,
 nullable values, `try`/`catch`/`finally`, named errors, declared error types (`error Name(...)`,
 `throw Name with "message"`), `assert`, `defer`, `Result`, reactive variables (`reactive`, `when`,
-`computed`), `struct` value types, one-call `run` bodies (`if x run f()`, `else run g()`, `for i in xs run f(i)`),
+`computed`), `struct` value types, the built-in `vector2`/`vector3`/`vector4` types (also written `<vector3 x=1 y=2 z=3>`) and
+`slice`s (`a:b`, `text[:5]`, `xs[::-1]`, `operator :`), `x .= f()`, `x++`/`x--`, `**` and `**=`, one-call `run` bodies (`if x run f()`, `else run g()`, `for i in xs run f(i)`),
 negated bool aliases (`bool on/off`), units (`unitns name`, `unit`, `unitconv`, quantity
 literals such as `100m`, quantity types of any numeric type such as `u8[time]` and
 `float[metric.length]`, `x in cm`, `type`/`unit`/`unitns`, units shared across modules, `unitconv A = B`
@@ -130,7 +131,9 @@ components (also qualified by module, `<cogwheel.heading>`; including `void comp
 `<br>` with no closing tag), element families, void tags and components written without a closing
 tag (`<cogwheel.conf key="a" value="1">`), and local, path, package (every `.flywheel-modules` at
 or above the importing file, nearest first) and library-module
-imports with aliases, wildcards, `private`, and `public import name.*`.
+imports with aliases, wildcards, `private`, and `public import name.*`, including relative imports
+(`import .rules`, `import ..shared.util`), the project root (`import @lib.ui`, `"@/lib/x.fw"`), groups
+(`import ui.{button, slider as s}`), and directory modules (`import ui` loads `ui/ui.fw`).
 
 Native modules: `math`, `fs`, `os` (including `run`, `process`, `pipeline` with captured output
 and timeouts, and background processes with `start`, `alive`, `wait`, and `kill`), `time`, `io`, `json` (parse, encode, typed `decode`, `Class.from_json`,

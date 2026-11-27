@@ -1,0 +1,7 @@
+import ..ledger
+function name() returns string
+    return "kit"
+end
+function parent_loaded() returns bool
+    return true
+end

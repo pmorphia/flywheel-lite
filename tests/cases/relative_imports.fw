@@ -1,0 +1,4 @@
+import .lib.kit
+import .lib.kit.{tools, tools as t2}
+import .lib.kit.tools.*
+print kit.name(), kit.parent_loaded(), tools.hammer(), t2.saw(), saw()

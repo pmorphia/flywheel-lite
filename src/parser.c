@@ -255,16 +255,22 @@ static int precedence(const Token *t) {
         return 3;
     if (tis(t, "<") || tis(t, ">") || tis(t, "<=") || tis(t, ">=") || tis(t, "in") || tis(t, "is"))
         return 4;
-    if (tis(t, "as"))
-        return 9;
-    if (tis(t, "otherwise"))
+    /* `a:b` binds looser than everything but comparisons: `lo otherwise 0 : n - 1` */
+    if (tis(t, ":"))
         return 5;
-    if (tis(t, "..") || tis(t, "..<"))
+    if (tis(t, "as"))
+        return 10;
+    if (tis(t, "otherwise"))
         return 6;
-    if (tis(t, "+") || tis(t, "-"))
+    if (tis(t, "..") || tis(t, "..<"))
         return 7;
-    if (tis(t, "*") || tis(t, "/") || tis(t, "//") || tis(t, "%"))
+    if (tis(t, "+") || tis(t, "-"))
         return 8;
+    if (tis(t, "*") || tis(t, "/") || tis(t, "//") || tis(t, "%"))
+        return 9;
+    /* `a ** b`: tighter than unary minus on its left (-2 ** 2 is -4), right associative */
+    if (tis(t, "**"))
+        return 11;
     return 0;
 }
 static int prec_of(const char *s) {
@@ -859,6 +865,45 @@ static Node *parse_markup(Parser *P) {
     mk_nancestors = saved;
     if (m.p != m.n)
         pfail_at(P, t->line, t->col, "unexpected text after markup%s", "");
+    if (e->kind == N_ELEMENT && e->text && lx_vector_tag(e->text, strlen(e->text))) {
+        /* `<vector2 x=1 y={n}>` is the call vector2(x=1, y=n). Unquoted and quoted values are
+           whole numbers; `{expression}` passes any expression. */
+        Node *call = tnode(P, N_CALL, "", t);
+        nl_push(P->arena, &call->args, tnode(P, N_NAME, e->text, t));
+        int dimensions = e->text[6] - '0';
+        for (int i = 0; i < e->nnames; i++) {
+            const char *axis = e->names[i];
+            Node *value = e->args.items[i];
+            const char *found = strlen(axis) == 1 ? strchr("xyzw", axis[0]) : NULL;
+            if (!found || found - "xyzw" >= dimensions)
+                pfail_at(P, t->line, t->col, "%s has the components %.*s, not '%s'", e->text, dimensions, "xyzw",
+                         axis);
+            if (value->kind == N_STRING) {
+                const char *text = value->text;
+                size_t digits = text[0] == '-' || text[0] == '+' ? 1 : 0, n = strlen(text);
+                bool ok = !value->valueless && digits < n;
+                for (size_t k = digits; k < n && ok; k++)
+                    ok = isdigit((unsigned char)text[k]);
+                if (!ok)
+                    pfail_at(P, t->line, t->col,
+                             "<%s> component '%s' must be a whole number or {expression}, such as %s=3", e->text,
+                             axis, axis);
+                Node *number = tnode(P, N_INT, text + digits, t);
+                if (text[0] == '-') {
+                    Node *negative = tnode(P, N_UNARY, "-", t);
+                    nl_push(P->arena, &negative->args, number);
+                    number = negative;
+                }
+                value = number;
+            }
+            Node *named = tnode(P, N_NAMED, axis, t);
+            nl_push(P->arena, &named->args, value);
+            nl_push(P->arena, &call->args, named);
+        }
+        if (e->args.count > e->nnames)
+            pfail_at(P, t->line, t->col, "<%s> is a value and holds no children%s", e->text, "");
+        return call;
+    }
     return e;
 }
 
@@ -869,6 +914,49 @@ static Node *spawn(Parser *P);
 static Node *match_expression(Parser *P);
 static void match_cases(Parser *P, Node *s, bool arrows);
 
+/* `name=value` in a call's parentheses passes a named argument: `vector3(x=1, y=2, z=3)`. */
+static Node *call_argument(Parser *P) {
+    if (peek(P, 0)->kind == T_ID && peek(P, 1)->kind == T_OP && tis(peek(P, 1), "=")) {
+        Token *name = take(P);
+        take(P);
+        Node *n = tnode(P, N_NAMED, tstr(P, name), name);
+        nl_push(P->arena, &n->args, expression(P, 0));
+        return n;
+    }
+    return expression(P, 0);
+}
+/* `x[i]`, or a slice `x[a:b]`, `x[a:b:step]` with any part left out (`x[:3]`, `x[::-1]`):
+   an N_SLICE of three parts, N_OMITTED where none was written. */
+static Node *slice_part(Parser *P) {
+    Token *t = peek(P, 0);
+    if (tis(t, ":") || tis(t, "]"))
+        return tnode(P, N_OMITTED, "", t);
+    bool saved = P->colon_stop;
+    P->colon_stop = true;
+    Node *e = expression(P, 0);
+    P->colon_stop = saved;
+    return e;
+}
+static Node *subscript(Parser *P) {
+    Token *t = peek(P, 0);
+    Node *first = slice_part(P);
+    if (!(peek(P, 0)->kind == T_OP && tis(peek(P, 0), ":"))) {
+        if (first->kind == N_OMITTED)
+            pfail_at(P, t->line, t->col, "expected an index%s", "");
+        return first;
+    }
+    P->uses_prelude = true;
+    Node *n = tnode(P, N_SLICE, "", t);
+    nl_push(P->arena, &n->args, first);
+    take(P);
+    nl_push(P->arena, &n->args, slice_part(P));
+    if (peek(P, 0)->kind == T_OP && tis(peek(P, 0), ":")) {
+        take(P);
+        nl_push(P->arena, &n->args, slice_part(P));
+    } else
+        nl_push(P->arena, &n->args, tnode(P, N_OMITTED, "", t));
+    return n;
+}
 static Node *prefix_inner(Parser *P);
 static Node *prefix(Parser *P) {
     Token *t = peek(P, 0);
@@ -937,14 +1025,19 @@ static Node *prefix_inner(Parser *P) {
         e = tnode(P, N_NULL, "", t);
     } else if (accept(P, "-") || accept(P, "+") || accept(P, "not")) {
         e = tnode(P, N_UNARY, tstr(P, t), t);
-        nl_push(P->arena, &e->args, expression(P, tis(t, "not") ? 2 : 9));
+        nl_push(P->arena, &e->args, expression(P, tis(t, "not") ? 2 : 10));
         span_from(P, e, t->line, t->col);
         return e;
     } else if (accept(P, "(")) {
+        bool saved = P->colon_stop;
+        P->colon_stop = false;
         e = expression(P, 0);
+        P->colon_stop = saved;
         expect(P, ")");
         e->grouped = true;
     } else if (accept(P, "[")) {
+        bool saved = P->colon_stop;
+        P->colon_stop = false;
         e = tnode(P, N_ARRAY, "", t);
         if (!accept(P, "]")) {
             do {
@@ -952,16 +1045,22 @@ static Node *prefix_inner(Parser *P) {
             } while (accept(P, ","));
             expect(P, "]");
         }
+        P->colon_stop = saved;
     } else if (accept(P, "{")) {
+        bool saved = P->colon_stop;
         e = tnode(P, N_MAP, "", t);
         if (!accept(P, "}")) {
+            P->colon_stop = true; /* `{a: b}` is a map entry, not the slice a:b */
             nl_push(P->arena, &e->args, expression(P, 0));
+            P->colon_stop = false;
             if (!accept(P, ":"))
                 e->kind = N_SET;
             else
                 nl_push(P->arena, &e->args, expression(P, 0));
             while (accept(P, ",")) {
+                P->colon_stop = e->kind == N_MAP;
                 nl_push(P->arena, &e->args, expression(P, 0));
+                P->colon_stop = false;
                 if (e->kind == N_MAP) {
                     expect(P, ":");
                     nl_push(P->arena, &e->args, expression(P, 0));
@@ -969,6 +1068,7 @@ static Node *prefix_inner(Parser *P) {
             }
             expect(P, "}");
         }
+        P->colon_stop = saved;
     } else if (t->kind == T_ID && tis(t, "inst") && peek(P, 1)->kind == T_ID && peek(P, 1)->line == t->line) {
         pfail_at(P, t->line, t->col, "'inst' was removed: write this.%.*s", peek(P, 1)->len, peek(P, 1)->text);
     } else if (accept(P, "attr")) {
@@ -1041,21 +1141,32 @@ static Node *prefix_inner(Parser *P) {
             e = n;
             span_from(P, e, t->line, t->col);
         } else if (accept(P, "(")) {
+            bool saved = P->colon_stop;
+            P->colon_stop = false;
             Node *n = tnode(P, N_CALL, "", t);
             nl_push(P->arena, &n->args, e);
             if (!accept(P, ")")) {
                 do {
-                    nl_push(P->arena, &n->args, expression(P, 0));
+                    nl_push(P->arena, &n->args, call_argument(P));
+                    Node *last = n->args.items[n->args.count - 1];
+                    if (last->kind != N_NAMED && n->args.count > 2 &&
+                        n->args.items[n->args.count - 2]->kind == N_NAMED)
+                        pfail_at(P, last->line, last->col,
+                                 "positional arguments come before named ones (name=value)%s", "");
                 } while (accept(P, ","));
                 expect(P, ")");
             }
+            P->colon_stop = saved;
             e = n;
             span_from(P, e, t->line, t->col);
         } else if (accept(P, "[")) {
+            bool saved = P->colon_stop;
+            P->colon_stop = false;
             Node *n = tnode(P, N_INDEX, "", t);
             nl_push(P->arena, &n->args, e);
-            nl_push(P->arena, &n->args, expression(P, 0));
+            nl_push(P->arena, &n->args, subscript(P));
             expect(P, "]");
+            P->colon_stop = saved;
             e = n;
             span_from(P, e, t->line, t->col);
         } else
@@ -1126,6 +1237,10 @@ static Node *operators(Parser *P, Node *e, int level) {
             pfail_at(P, op->line, op->col, "'?\?' was renamed to 'otherwise': write 'a otherwise b'%s", "");
         if (!((op->kind == T_OP || op->kind == T_ID) && precedence(op) > level))
             break;
+        if (P->colon_stop && op->kind == T_OP && tis(op, ":"))
+            break;
+        if (op->kind == T_OP && (tis(op, ":") || tis(op, "**")))
+            P->uses_prelude = true;
         if (tis(op, "is") || tis(op, "as")) {
             take(P);
             Node *n = tnode(P, tis(op, "is") ? N_IS : N_AS, parse_type(P), op);
@@ -1157,7 +1272,7 @@ static Node *operators(Parser *P, Node *e, int level) {
         /* `a otherwise b` is the null fallback, internally the binary operator "??" */
         Node *n = tnode(P, N_BINARY, !strcmp(ops, "otherwise") ? "??" : ops, op);
         nl_push(P->arena, &n->args, e);
-        nl_push(P->arena, &n->args, expression(P, prec));
+        nl_push(P->arena, &n->args, expression(P, !strcmp(ops, "**") ? prec - 1 : prec));
         span_after(P, n, e);
         e = n;
     }
@@ -1189,9 +1304,17 @@ static Node *parse_sub_expression(Parser *P, const char *text, size_t n, int lin
     sub.ntokens = toks.count;
     sub.jmp = P->jmp;
     sub.err = P->err;
+    for (int i = 0; i < toks.count; i++) {
+        Token *k = &toks.items[i];
+        if ((k->kind == T_ID && (tis(k, "slice") || lx_vector_tag(k->text, (size_t)k->len))) ||
+            (k->kind == T_MARKUP && k->len > 7 && !memcmp(k->text, "<vector", 7)))
+            sub.uses_prelude = true;
+    }
     Node *v = expression(&sub, 0);
     if (peek(&sub, 0)->kind != T_EOF)
         pfail_at(P, line, col, "invalid %s expression", what);
+    if (sub.uses_prelude)
+        P->uses_prelude = true;
     (void)col;
     return v;
 }
@@ -1402,7 +1525,7 @@ static void run_body(Parser *P, NodeList *out) {
         pfail(P, RUN_USAGE ", not '%s'", tstr(P, t));
     Node *s = tnode(P, S_EXPR, NULL, t);
     s->target = outer(P);
-    static const char *assign_ops[] = {"=", "+=", "-=", "*=", "/=", "//=", "%=", NULL};
+    static const char *assign_ops[] = {"=", "+=", "-=", "*=", "/=", "//=", "%=", "**=", ".=", "++", "--", NULL};
     Token *nx = peek(P, 0);
     if (nx->kind == T_OP && in_list(nx, assign_ops))
         pfail(P, RUN_USAGE "; assignments need 'do' ... 'end'%s", "");
@@ -1506,7 +1629,8 @@ static Node *statement_inner(Parser *P) {
         return s;
     }
     if (ptext(P, 0, "assert") && peek(P, 0)->kind == T_ID) {
-        static const char *not_keyword[] = {"=", "+=", "-=", "*=", "/=", "//=", "%=", ".", "[", ")", ",", NULL};
+        static const char *not_keyword[] = {"=", "+=", "-=", "*=", "/=", "//=", "%=", "**=", ".=", "++", "--",
+                                            ".", "[", ")", ",", NULL};
         Token *nx = peek(P, 1);
         if (!(nx->kind == T_OP && in_list(nx, not_keyword))) {
             Token *at = take(P);
@@ -1853,10 +1977,56 @@ static Node *statement_inner(Parser *P) {
         finish(P);
         return s;
     }
+    /* `++x` / `--x` and `x++` / `x--` add or subtract 1: `x += 1`. */
+    if (peek(P, 0)->kind == T_OP && (tis(peek(P, 0), "++") || tis(peek(P, 0), "--"))) {
+        Token *op = take(P);
+        s->target = outer(P);
+        s->kind = S_ASSIGN;
+        s->op = tis(op, "++") ? "+=" : "-=";
+        s->expr = tnode(P, N_INT, "1", op);
+        finish(P);
+        return s;
+    }
+    int target_start = pindex(P, 0);
     s->target = outer(P);
-    static const char *assign_ops[] = {"=", "+=", "-=", "*=", "/=", "//=", "%=", NULL};
+    static const char *assign_ops[] = {"=", "+=", "-=", "*=", "/=", "//=", "%=", "**=", NULL};
     Token *nx = peek(P, 0);
-    if (nx->kind == T_OP && in_list(nx, assign_ops)) {
+    if (nx->kind == T_OP && (tis(nx, "++") || tis(nx, "--"))) {
+        Token *op = take(P);
+        s->kind = S_ASSIGN;
+        s->op = tis(op, "++") ? "+=" : "-=";
+        s->expr = tnode(P, N_INT, "1", op);
+    } else if (nx->kind == T_OP && tis(nx, ".=")) {
+        /* `x .= f(a)` is `x = x.f(a)`: the target's tokens are read again before the member. */
+        int at = pindex(P, 0);
+        Token *op = take(P);
+        if (peek(P, 0)->kind != T_ID)
+            pfail_at(P, op->line, op->col, "'.=' expects a member after it, such as 'name .= upper()'%s", "");
+        int copied = 0;
+        for (int i = target_start; i < at; i++)
+            if (P->tokens[i].kind != T_NL)
+                copied++;
+        Token *tokens = arena_alloc(P->arena, sizeof(Token) * (size_t)(P->ntokens + copied + 1));
+        int k = 0;
+        for (int i = 0; i < P->pos; i++)
+            tokens[k++] = P->tokens[i];
+        for (int i = target_start; i < at; i++)
+            if (P->tokens[i].kind != T_NL)
+                tokens[k++] = P->tokens[i];
+        Token dot = P->tokens[at];
+        dot.text = ".";
+        dot.len = 1;
+        dot.spaced = false;
+        tokens[k++] = dot;
+        for (int i = P->pos; i < P->ntokens; i++)
+            tokens[k++] = P->tokens[i];
+        P->tokens = tokens;
+        P->ntokens = k;
+        P->tokens[pindex(P, copied + 1)].spaced = false;
+        s->kind = S_ASSIGN;
+        s->op = "=";
+        s->expr = outer(P);
+    } else if (nx->kind == T_OP && in_list(nx, assign_ops)) {
         s->kind = S_ASSIGN;
         s->op = tstr(P, take(P));
         s->expr = outer(P);
@@ -2149,7 +2319,8 @@ static FuncDecl *parse_function(Parser *P, const char *owner, bool signature_onl
     if (owner && ptext(P, 0, "operator") && peek(P, 1)->kind != T_NL && !ptext(P, 1, "(")) {
         take(P);
         Token *op = take(P);
-        static const char *overloadable[] = {"+", "-", "*", "/", "//", "%", "==", "<", "<=", ">", ">=", "[", NULL};
+        static const char *overloadable[] = {"+", "-", "*", "/", "//", "%", "==", "<", "<=", ">", ">=", "[",
+                                             ":", "**", NULL};
         if (!in_list(op, overloadable)) {
             char nm[32];
             snprintf(nm, sizeof nm, "%.*s", op->len > 20 ? 20 : op->len, op->text);
@@ -2247,6 +2418,60 @@ static bool parse_program_with(Arena *arena, const char *src, size_t len, Progra
     lx_set_void_components(saved);
     return ok;
 }
+/* One module named in an import statement. */
+typedef struct {
+    const char *name, *alias;
+    bool wildcard, aliased;
+    int line, col;
+} ImportEntry;
+static void import_group(Parser *P, const char *head, ImportEntry **list, int *n, int *cap);
+/* `name.part`, `name.*`, `name as alias`, or `name.{...}` after `head` (a prefix such as "..",
+   "@", or "ui."). */
+static void import_entry(Parser *P, const char *head, ImportEntry **list, int *n, int *cap) {
+    Token *first = peek(P, 0);
+    SBuf name = {0};
+    sb_add(&name, head, strlen(head));
+    bool wildcard = false;
+    Token *id = identifier(P);
+    sb_add(&name, id->text, (size_t)id->len);
+    while (accept(P, ".")) {
+        if (accept(P, "*")) {
+            wildcard = true;
+            break;
+        }
+        if (accept(P, "{")) {
+            sb_addc(&name, '.');
+            const char *group = arena_strndup(P->arena, name.d, name.n);
+            free(name.d);
+            import_group(P, group, list, n, cap);
+            return;
+        }
+        Token *part = identifier(P);
+        sb_addc(&name, '.');
+        sb_add(&name, part->text, (size_t)part->len);
+    }
+    ImportEntry e = {arena_strndup(P->arena, name.d, name.n), NULL, wildcard, false, first->line, first->col};
+    free(name.d);
+    if (accept(P, "as")) {
+        if (wildcard)
+            pfail(P, "wildcard imports cannot have an alias%s", "");
+        e.alias = tstr(P, identifier(P));
+        e.aliased = true;
+    }
+    GROWV(P->arena, *list, *n, *cap, ImportEntry);
+    (*list)[(*n)++] = e;
+}
+/* `{a, b as c, d.*}`: after the `{` */
+static void import_group(Parser *P, const char *head, ImportEntry **list, int *n, int *cap) {
+    do {
+        newlines(P);
+        if (ptext(P, 0, "}"))
+            break;
+        import_entry(P, head, list, n, cap);
+        newlines(P);
+    } while (accept(P, ","));
+    expect(P, "}");
+}
 static bool parse_program_body(Arena *arena, const char *src, size_t len, Program *out, CompileError *err,
                                bool defer_units) {
     memset(out, 0, sizeof *out);
@@ -2272,6 +2497,14 @@ static bool parse_program_body(Arena *arena, const char *src, size_t len, Progra
         else if (i + 2 < toks.count && toks.items[i].kind == T_ID && tis(&toks.items[i], "struct") &&
                  toks.items[i + 1].kind == T_ID && toks.items[i + 2].kind == T_NL)
             callables.names[callables.count++] = tstr(&P, &toks.items[i + 1]);
+    /* The built-in vector and slice types live in a library module (stdlib/fw/_prelude.fw) that a
+       program loads only when it names them or writes a slice. */
+    for (int i = 0; i < toks.count; i++) {
+        Token *k = &toks.items[i];
+        if ((k->kind == T_ID && (tis(k, "slice") || lx_vector_tag(k->text, (size_t)k->len))) ||
+            (k->kind == T_MARKUP && k->len > 7 && !memcmp(k->text, "<vector", 7)))
+            P.uses_prelude = true;
+    }
     if (setjmp(jb)) {
         callables = saved_callables;
         return false;
@@ -2327,7 +2560,10 @@ static bool parse_program_body(Arena *arena, const char *src, size_t len, Progra
             ImportDecl im;
             memset(&im, 0, sizeof im);
             im.line = peek(&P, 0)->line;
-            if (ptext(&P, 0, "+") && peek(&P, 0)->kind == T_OP && !peek(&P, 0)->spaced &&
+            if (ptext(&P, 0, "++") && peek(&P, 0)->kind == T_OP && !peek(&P, 0)->spaced) {
+                take(&P); /* `import++` lexes as an increment token */
+                im.kind = "cxx";
+            } else if (ptext(&P, 0, "+") && peek(&P, 0)->kind == T_OP && !peek(&P, 0)->spaced &&
                 ptext(&P, 1, "+") && !peek(&P, 1)->spaced) {
                 take(&P);
                 take(&P);
@@ -2366,24 +2602,52 @@ static bool parse_program_body(Arena *arena, const char *src, size_t len, Progra
                 im.path = !dotted;
                 if (im.path && im.wildcard)
                     pfail_at(&P, name_tok->line, name_tok->col, "wildcard imports need a module name, not a path%s", "");
-            } else {
-                Token *id = identifier(&P);
-                sb_add(&name, id->text, (size_t)id->len);
-                while (accept(&P, ".")) {
-                    if (accept(&P, "*")) {
-                        im.wildcard = true;
-                        break;
-                    }
-                    Token *part = identifier(&P);
-                    sb_addc(&name, '.');
-                    sb_add(&name, part->text, (size_t)part->len);
-                }
             }
-            im.name = arena_strndup(arena, name.d, name.n);
+            /* The modules this statement imports: one, or several for `import ui.{a, b as c}`. */
+            ImportEntry *entries = NULL;
+            int nentries = 0, centries = 0;
+            if (name_tok->kind == T_STRING) {
+                ImportEntry one = {arena_strndup(arena, name.d, name.n), NULL, im.wildcard, false,
+                                   name_tok->line, name_tok->col};
+                if (accept(&P, "as")) {
+                    if (im.wildcard)
+                        pfail(&P, "wildcard imports cannot have an alias%s", "");
+                    one.alias = tstr(&P, identifier(&P));
+                }
+                GROWV(arena, entries, nentries, centries, ImportEntry);
+                entries[nentries++] = one;
+            } else {
+                /* A leading `.` starts at the importing file's directory and each further dot goes
+                   up one (`import ..shared.util`); `@` starts at the project root. */
+                SBuf prefix = {0};
+                while (peek(&P, 0)->kind == T_OP &&
+                       (tis(peek(&P, 0), ".") || tis(peek(&P, 0), "..") || tis(peek(&P, 0), "@")) &&
+                       (!prefix.n || !peek(&P, 0)->spaced)) {
+                    Token *t = take(&P);
+                    if (tis(t, "@") && prefix.n)
+                        pfail_at(&P, t->line, t->col, "'@' (the project root) starts an import name%s", "");
+                    sb_add(&prefix, t->text, (size_t)t->len);
+                    if (prefix.d[0] == '@' && ptext(&P, 0, ".") && !peek(&P, 0)->spaced)
+                        pfail(&P, "write `import @lib.util`, with no '.' after '@'%s", "");
+                }
+                const char *head = arena_strndup(arena, prefix.d ? prefix.d : "", prefix.n);
+                free(prefix.d);
+                if (*head && accept(&P, "{"))
+                    import_group(&P, head, &entries, &nentries, &centries);
+                else
+                    import_entry(&P, head, &entries, &nentries, &centries);
+            }
             free(name.d);
+            for (int e = 0; e < nentries; e++) {
+            ImportDecl one = im;
+            one.name = entries[e].name;
+            one.wildcard = entries[e].wildcard;
+            one.line = entries[e].line;
+            if (name_tok->kind != T_STRING)
+                one.path = false;
             const char *alias;
-            if (im.path) {
-                const char *base = im.name;
+            if (one.path) {
+                const char *base = one.name;
                 size_t bl = strcspn(base, "?#");
                 while (bl > 0 && (base[bl - 1] == '/' || base[bl - 1] == '\\'))
                     bl--;
@@ -2396,41 +2660,44 @@ static bool parse_program_body(Arena *arena, const char *src, size_t len, Progra
                     dot++;
                 alias = arena_strndup(arena, base + start, dot - start);
             } else {
-                const char *dot = strrchr(im.name, '.');
-                alias = dot ? dot + 1 : im.name;
+                const char *dot = strrchr(one.name, '.');
+                const char *at = strrchr(one.name, '@');
+                const char *cut = dot && (!at || dot > at) ? dot : at;
+                alias = cut ? cut + 1 : one.name;
             }
-            if (accept(&P, "as")) {
-                if (im.wildcard)
-                    pfail(&P, "wildcard imports cannot have an alias%s", "");
-                alias = tstr(&P, identifier(&P));
+            if (entries[e].alias) {
+                alias = entries[e].alias;
             } else if (!ident_ok(alias)) {
-                pfail_at(&P, name_tok->line, name_tok->col, "cannot name the module imported from \"%s\"; add `as name`", im.name);
+                pfail_at(&P, entries[e].line, entries[e].col, "cannot name the module imported from \"%s\"; add `as name`", one.name);
             }
-            im.alias = alias;
-            im.reexport = reexport;
-            if (reexport && !im.wildcard)
-                pfail_at(&P, im.line, 1, "write `public import %s.*` to re-export a module's names", im.name);
-            if (reexport && im.kind)
-                pfail_at(&P, im.line, 1, "native imports cannot be re-exported%s", "");
-            if (im.wildcard && !strcmp(im.name, "html"))
+            one.alias = alias;
+            one.reexport = reexport;
+            if (reexport && !one.wildcard)
+                pfail_at(&P, one.line, 1, "write `public import %s.*` to re-export a module's names", one.name);
+            if (reexport && one.kind)
+                pfail_at(&P, one.line, 1, "native imports cannot be re-exported%s", "");
+            if (one.wildcard && one.kind)
+                pfail_at(&P, one.line, 1, "native imports cannot be wildcards%s", "");
+            if (one.wildcard && !strcmp(one.name, "html"))
                 out->html = true;
-            if (im.wildcard && !strcmp(im.name, "svg"))
+            if (one.wildcard && !strcmp(one.name, "svg"))
                 out->svg = true;
             /* `import time.time` names the time unit namespace, which `import time` brings. */
-            if (!im.path && !strcmp(im.name, "time.time"))
-                im.name = "time";
+            if (!one.path && !strcmp(one.name, "time.time"))
+                one.name = "time";
             bool repeat = false;
             for (int i = 0; i < out->nimports; i++)
-                if (!strcmp(out->imports[i].alias, alias) && !im.wildcard && !out->imports[i].wildcard) {
+                if (!strcmp(out->imports[i].alias, alias) && !one.wildcard && !out->imports[i].wildcard) {
                     /* the same module under the same name again changes nothing */
-                    if (!im.path && !out->imports[i].path && !strcmp(out->imports[i].name, im.name))
+                    if (!one.path && !out->imports[i].path && !strcmp(out->imports[i].name, one.name))
                         repeat = true;
                     else
-                        pfail_at(&P, im.line, 1, "duplicate import '%s'", alias);
+                        pfail_at(&P, one.line, 1, "duplicate import '%s'", alias);
                 }
             if (!repeat) {
                 GROWV(arena, out->imports, out->nimports, cap_imp, ImportDecl);
-                out->imports[out->nimports++] = im;
+                out->imports[out->nimports++] = one;
+            }
             }
             finish(&P);
         } else if (ptext(&P, 0, "function") && !ptext(&P, 1, "(")) {
@@ -2931,6 +3198,7 @@ static bool parse_program_body(Arena *arena, const char *src, size_t len, Progra
     if (!defer_units)
         lower_units(&P, out, NULL, 0, false);
     lower_reactive(&P, out);
+    out->uses_prelude = P.uses_prelude;
     callables = saved_callables;
     return true;
 }

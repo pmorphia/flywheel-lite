@@ -215,6 +215,7 @@ typedef struct ObjFunction {
     ObjString *name;
     struct ObjModule *module;
     struct ObjClass *owner; /* defining class, for super (static methods: their class) */
+    Value param_names;      /* tuple of parameter names, for named arguments, or null */
     uint8_t access;         /* methods: 0 public, 1 private, 2 protected */
     InlineCache *caches;
     int ncaches;
@@ -459,6 +460,7 @@ struct VM {
 
     ObjClass *error_class; /* unused placeholder for builtin errors */
     ObjClass *task_class;  /* thread.task, made by `spawn` */
+    struct ObjModule *prelude; /* stdlib/fw/_prelude.fw once loaded: vector2/3/4, slice */
     ValueArray finalizers; /* unreachable instances whose destructors run at the next safepoint */
     bool finalizing;
     ObjString *s_init, *s_to_string, *s_length, *s_message, *s_name;
@@ -760,6 +762,8 @@ bool lib_json_encode(VM *vm, Value v, Buf *b, int indent, int level, bool sorted
 bool lib_element_new(VM *vm, ObjString *tag, ObjList *names, Value *attrs, int nchildren,
                      Value *children, Value *out);
 const char *lib_embedded_module(const char *name);
+/* Calls fn with each entry name of a directory (no . or ..); false when it cannot be read. */
+bool lib_each_entry(const char *dir, void (*fn)(const char *name, void *ctx), void *ctx);
 bool seq_items(VM *vm, Value v, ObjList **out); /* array/tuple/set/map keys/string chars */
 bool to_int64(VM *vm, Value v, int64_t *out, const char *what);
 bool to_double(VM *vm, Value v, double *out, const char *what);

@@ -1,0 +1,6 @@
+function hammer() returns string
+    return "hammer"
+end
+function saw() returns string
+    return "saw"
+end

@@ -425,7 +425,7 @@ bool vm_init_fields(VM *vm, ObjClass *k, ObjInstance *inst, int argc, Value *arg
         return vm_throw(vm, "TypeError", "%s takes at most %d argument%s, got %d", k->name->chars,
                         k->nfields, k->nfields == 1 ? "" : "s", argc);
     for (int i = 0; i < argc; i++)
-        if (!set_field(vm, inst, i, args[i]))
+        if (!IS_UNDEF(args[i]) && !set_field(vm, inst, i, args[i])) /* undef: left out by name */
             return false;
     return true;
 }
@@ -439,6 +439,8 @@ static bool init_base_fields(VM *vm, ObjClass *base, ObjInstance *inst, int argc
                         base->nfields, base->nfields == 1 ? "" : "s", argc);
     for (int i = 0; i < argc; i++) {
         Value idx;
+        if (IS_UNDEF(args[i]))
+            continue;
         if (!table_get(&inst->klass->field_index, base->field_names[i], &idx))
             return vm_throw(vm, "TypeError", "%s has no field '%s'", inst->klass->name->chars,
                             base->field_names[i]->chars);
@@ -1555,6 +1557,164 @@ static bool instance_op(VM *vm, const char *op, Value a, Value b, int argc, Valu
     return vm_call(vm, val_obj(new_bound(vm, a, m)), argc, args, out);
 }
 
+/* A public name of the prelude (stdlib/fw/_prelude.fw): slice, __slice_string, ... */
+static Value prelude_value(VM *vm, const char *name) {
+    if (!vm->prelude)
+        return val_null();
+    int slot = module_find(vm->prelude, str_intern_c(vm, name));
+    return slot < 0 ? val_null() : vm->prelude->values.items[slot];
+}
+/* `a ** b` and `a:b`: a class's operator, else powers of numbers and slices of integers. */
+static bool power_or_slice(VM *vm, uint8_t op, Value a, Value b, Value *out) {
+    const char *opname = op == OP_POW ? "**" : ":";
+    bool found;
+    if (!instance_op(vm, opname, a, b, 1, out, &found))
+        return false;
+    if (found)
+        return true;
+    if (op == OP_POW) {
+        if (IS_INT(a) && IS_INT(b)) {
+            int64_t base = a.as.i, left = b.as.i, result = 1;
+            if (left < 0)
+                return vm_throw(vm, "ValueError",
+                                "an integer power needs an exponent of 0 or more; write double(%lld) ** %lld",
+                                (long long)base, (long long)left);
+            while (left > 0) {
+                if ((left & 1) && MUL_OVF(result, base, &result))
+                    return overflow(vm, "**");
+                left >>= 1;
+                if (left > 0 && MUL_OVF(base, base, &base))
+                    return overflow(vm, "**");
+            }
+            *out = val_int(result);
+            return true;
+        }
+        if (IS_NUM(a) && IS_NUM(b)) {
+            *out = val_double(pow(AS_NUM(a), AS_NUM(b)));
+            return true;
+        }
+        return type_error2(vm, opname, a, b);
+    }
+    if (IS_INT(a) && IS_INT(b)) {
+        Value k = prelude_value(vm, "slice");
+        if (!IS_OBJT(k, OBJ_CLASS))
+            return vm_throw(vm, "RuntimeError", "the prelude (slice) is not loaded");
+        Value args[2] = {a, b};
+        return vm_call(vm, k, 2, args, out);
+    }
+    Buf x, y;
+    buf_init(&x);
+    buf_init(&y);
+    type_name_of(vm, a, &x);
+    type_name_of(vm, b, &y);
+    bool r = vm_throw(vm, "TypeError",
+                      "':' makes a slice of two integers, such as 1:5, or calls an operator : that a class or "
+                      "struct declares; got %s and %s",
+                      x.data ? x.data : "value", y.data ? y.data : "value");
+    buf_free(&x);
+    buf_free(&y);
+    return r;
+}
+/* The parameter names of what OP_CALL_NAMED calls: a function, a bound method, or a class (its
+   constructor's parameters, or its fields). */
+static bool callee_params(VM *vm, Value callee, Value *names, ObjString ***fields, int *count, int *required,
+                          const char **what) {
+    Value target = callee;
+    if (IS_OBJT(target, OBJ_BOUND))
+        target = ((ObjBound *)AS_OBJ(target))->method;
+    if (IS_OBJT(target, OBJ_CLASS)) {
+        ObjClass *k = AS_CLASS(target);
+        *what = k->name->chars;
+        Value init = applicable_init(k);
+        if (IS_NULL(init)) {
+            *fields = k->field_names;
+            *count = k->nfields;
+            *required = 0;
+            return true;
+        }
+        target = init;
+    }
+    if (IS_OBJT(target, OBJ_CLOSURE)) {
+        ObjFunction *fn = ((ObjClosure *)AS_OBJ(target))->fn;
+        if (*what == NULL)
+            *what = fn->name->chars;
+        if (IS_NULL(fn->param_names))
+            return vm_throw(vm, "TypeError", "%s does not take named arguments", fn->name->chars);
+        *names = fn->param_names;
+        *count = fn->arity;
+        *required = fn->required;
+        return true;
+    }
+    return vm_throw(vm, "TypeError",
+                    "named arguments (name=value) work in calls of functions, methods, and constructors");
+}
+/* Moves the last `named` arguments (named by `names`) to their parameters' positions. A
+   parameter left out before a later given one gets undef, which the callee treats as not passed. */
+static bool bind_named(VM *vm, int argc, ObjList *names, int named, int *out_argc) {
+    Value *slot = vm->sp - argc - 1;
+    Value params = val_null();
+    ObjString **fields = NULL;
+    int count = 0, required = 0;
+    const char *what = NULL;
+    if (!callee_params(vm, *slot, &params, &fields, &count, &required, &what))
+        return false;
+    if (count > 250)
+        return vm_throw(vm, "TypeError", "too many parameters for named arguments");
+    int positional = argc - named;
+    if (positional > count)
+        return vm_throw(vm, "TypeError", "too many arguments to %s", what);
+    Value bound[256];
+    bool given[256];
+    for (int i = 0; i < count; i++)
+        given[i] = false;
+    for (int i = 0; i < positional; i++) {
+        bound[i] = slot[1 + i];
+        given[i] = true;
+    }
+    int last = positional;
+    for (int j = 0; j < named; j++) {
+        ObjString *name = AS_STRING(names->items[j]);
+        int at = -1;
+        for (int i = 0; i < count && at < 0; i++) {
+            ObjString *p = fields ? fields[i] : AS_STRING(AS_LIST(params)->items[i]);
+            if (p == name || (p->len == name->len && !memcmp(p->chars, name->chars, (size_t)p->len)))
+                at = i;
+        }
+        if (at < 0) {
+            Buf list;
+            buf_init(&list);
+            for (int i = 0; i < count; i++) {
+                ObjString *p = fields ? fields[i] : AS_STRING(AS_LIST(params)->items[i]);
+                if (i)
+                    buf_add(&list, ", ", 2);
+                buf_add(&list, p->chars, (size_t)p->len);
+            }
+            bool r = vm_throw(vm, "TypeError", "%s has no parameter '%s'%s%s%s", what, name->chars,
+                              count ? " (it takes " : "", list.data ? list.data : "", count ? ")" : "");
+            buf_free(&list);
+            return r;
+        }
+        if (given[at])
+            return vm_throw(vm, "TypeError", "argument '%s' is given twice", name->chars);
+        given[at] = true;
+        bound[at] = slot[1 + positional + j];
+        if (at + 1 > last)
+            last = at + 1;
+    }
+    for (int i = 0; i < last; i++)
+        if (!given[i]) {
+            if (i < required) {
+                ObjString *p = fields ? fields[i] : AS_STRING(AS_LIST(params)->items[i]);
+                return vm_throw(vm, "TypeError", "missing argument '%s' to %s", p->chars, what);
+            }
+            bound[i] = val_undef();
+        }
+    for (int i = 0; i < last; i++)
+        slot[1 + i] = bound[i];
+    vm->sp = slot + 1 + last;
+    *out_argc = last;
+    return true;
+}
 static bool arith(VM *vm, uint8_t op, Value a, Value b, Value *out) {
     if (IS_INT(a) && IS_INT(b)) {
         int64_t x = a.as.i, y = b.as.i, r;
@@ -1779,6 +1939,19 @@ static bool compare_op(VM *vm, uint8_t op, Value a, Value b, bool *out) {
 
 static bool contains(VM *vm, Value container, Value item, bool *out) {
     *out = false;
+    if (IS_OBJT(container, OBJ_INSTANCE)) {
+        /* `x in object` asks a class or struct with contains(x): `i in 0:10` */
+        Value m = vm_find_method(AS_INSTANCE(container)->klass, str_intern_c(vm, "contains"));
+        if (!IS_NULL(m)) {
+            Value r, args[1] = {item};
+            if (!vm_call(vm, val_obj(new_bound(vm, container, m)), 1, args, &r))
+                return false;
+            if (!IS_BOOL(r))
+                return vm_throw(vm, "TypeError", "contains must return bool for `in`");
+            *out = r.as.b;
+            return true;
+        }
+    }
     if (IS_LIST(container)) {
         ObjList *l = AS_LIST(container);
         for (int i = 0; i < l->count; i++) {
@@ -1841,6 +2014,14 @@ static bool contains(VM *vm, Value container, Value item, bool *out) {
 /* ---------------------------------------------------------------- indexing */
 
 static bool index_value(VM *vm, Value obj, Value key, Value *out) {
+    /* `text[1:3]`, `xs[::-1]`, or a slice value: the part the slice picks (prelude helpers) */
+    if (IS_OBJT(key, OBJ_INSTANCE) && vm->prelude && (IS_STRING(obj) || IS_LIST(obj)) &&
+        IS_OBJT(prelude_value(vm, "slice"), OBJ_CLASS) &&
+        AS_INSTANCE(key)->klass == AS_CLASS(prelude_value(vm, "slice"))) {
+        Value helper = prelude_value(vm, IS_STRING(obj) ? "__slice_string" : "__slice_array");
+        Value args[2] = {obj, key};
+        return vm_call(vm, helper, 2, args, out);
+    }
     if (IS_LIST(obj)) {
         ObjList *l = AS_LIST(obj);
         if (!IS_INT(key))
@@ -2634,6 +2815,30 @@ static RunResult run(VM *vm, int base) {
         vm->sp[-1] = val_bool(r);
         DISPATCH();
     }
+    CASE(OP_COLON)
+    CASE(OP_POW) {
+        uint8_t op = ip[-1];
+        SYNC();
+        Value out;
+        CHECK(power_or_slice(vm, op, PEEK(1), PEEK(0), &out));
+        vm->sp--;
+        vm->sp[-1] = out;
+        DISPATCH();
+    }
+    CASE(OP_CALL_NAMED) {
+        uint8_t argc = READ_BYTE();
+        uint16_t nk = READ_U16();
+        uint8_t named = READ_BYTE();
+        SYNC();
+        vm_maybe_gc(vm);
+        int bound;
+        CHECK(bind_named(vm, argc, AS_LIST(CONST(nk)), named, &bound));
+        bool pushed;
+        CHECK(call_value(vm, bound, &pushed));
+        if (pushed)
+            RELOAD();
+        DISPATCH();
+    }
     CASE(OP_IN) {
         SYNC();
         bool r;
@@ -3289,7 +3494,7 @@ static RunResult run(VM *vm, int base) {
     CASE(OP_ARG_PRESENT) {
         uint8_t idx = READ_BYTE();
         uint16_t off = READ_U16();
-        if (frame->argc > idx)
+        if (frame->argc > idx && !IS_UNDEF(frame->slots[idx + 1])) /* undef: left out by name */
             ip += off;
         DISPATCH();
     }
@@ -3638,16 +3843,176 @@ static char *find_in_modules_dir(const char *mods, const char *name) {
     free(pkgdir);
     return r;
 }
+/* A module in `dir`: rel.fw or rel.fly, or a directory module rel/ holding its main module (as a
+   package's: `main` in its pulley.toml, else <name>.fw, main.fw, or lib.fw). */
+static char *module_in(const char *dir, const char *rel, bool directories) {
+    char *r = try_module_file(dir, rel);
+    if (r || !directories)
+        return r;
+    char *folder = join_path(dir, rel);
+    if (dir_exists(folder)) {
+        const char *stem = strrchr(rel, '/');
+        r = package_main(folder, stem ? stem + 1 : rel);
+    }
+    free(folder);
+    return r;
+}
+/* `import @name`: the nearest directory at or above the main file with a pulley.toml, or the
+   main file's directory. */
+static char *project_root(VM *vm) {
+    char *main_dir = dir_of(vm->main_path ? vm->main_path : "./main.fw");
+    char *d = canonical(main_dir);
+    for (;;) {
+        char *toml = join_path(d, "pulley.toml");
+        bool found = file_exists(toml);
+        free(toml);
+        if (found) {
+            free(main_dir);
+            return d;
+        }
+        char *up = dir_of(d);
+        bool top = !strcmp(up, d) || !strcmp(up, ".") || !up[0];
+        free(d);
+        d = up;
+        if (top)
+            break;
+    }
+    free(d);
+    char *r = canonical(main_dir);
+    free(main_dir);
+    return r;
+}
+/* Edit distance, for suggesting a close module name. */
+static size_t edit_distance(const char *a, const char *b) {
+    size_t n = strlen(b), row[256];
+    if (n >= 255 || strlen(a) >= 255)
+        return 1000;
+    for (size_t j = 0; j <= n; j++)
+        row[j] = j;
+    for (size_t i = 1; a[i - 1]; i++) {
+        size_t diagonal = row[0];
+        row[0] = i;
+        for (size_t j = 1; j <= n; j++) {
+            size_t above = row[j];
+            size_t best = row[j] + 1 < row[j - 1] + 1 ? row[j] + 1 : row[j - 1] + 1;
+            size_t swap = diagonal + (a[i - 1] == b[j - 1] ? 0 : 1);
+            row[j] = best < swap ? best : swap;
+            diagonal = above;
+        }
+    }
+    return row[n];
+}
+typedef struct {
+    const char *last, *folder;
+    size_t best;
+    char found[256];
+} Suggestion;
+static void suggest_entry(const char *entry, void *ctx) {
+    Suggestion *sg = ctx;
+    char stem[256];
+    snprintf(stem, sizeof stem, "%s", entry);
+    if (stem[0] == '.')
+        return;
+    size_t len = strlen(stem);
+    bool module = false;
+    if (len > 3 && !strcmp(stem + len - 3, ".fw")) {
+        stem[len - 3] = 0;
+        module = true;
+    } else if (len > 4 && !strcmp(stem + len - 4, ".fly")) {
+        stem[len - 4] = 0;
+        module = true;
+    } else {
+        char *full = join_path(sg->folder, stem);
+        module = dir_exists(full);
+        free(full);
+    }
+    if (!module || !strcmp(stem, sg->last))
+        return;
+    size_t distance = edit_distance(stem, sg->last);
+    if (distance < sg->best) {
+        sg->best = distance;
+        snprintf(sg->found, sizeof sg->found, "%s", stem);
+    }
+}
+/* "; did you mean 'x'?" for a missing module `name` looked for in `dir`, or "". */
+static void module_suggestion(const char *dir, const char *name, char *out, size_t size) {
+    out[0] = 0;
+    const char *last = name;
+    for (const char *c = name; *c; c++)
+        if (*c == '.' || *c == '@' || *c == '/')
+            last = c + 1;
+    char folder[1024];
+    size_t prefix = (size_t)(last - name), skip = 0;
+    while (skip < prefix && (name[skip] == '.' || name[skip] == '@'))
+        skip++;
+    snprintf(folder, sizeof folder, "%s/%.*s", dir, (int)(prefix - skip), name + skip);
+    for (char *c = folder + strlen(dir) + 1; *c; c++)
+        if (*c == '.')
+            *c = '/';
+    Suggestion sg;
+    sg.last = last;
+    sg.folder = folder;
+    sg.best = strlen(last) / 3 + 3;
+    sg.found[0] = 0;
+    lib_each_entry(folder, suggest_entry, &sg);
+    const char *found = sg.found;
+    if (found[0])
+        snprintf(out, size, "; did you mean '%.*s%s'?", (int)prefix, name, found);
+}
 static bool is_path_import(const char *name) {
     size_t n = strlen(name);
     if (strchr(name, '/') || strchr(name, '\\'))
         return true;
     return (n > 3 && !strcmp(name + n - 3, ".fw")) || (n > 4 && !strcmp(name + n - 4, ".fly"));
 }
+/* `import .x` (the importing file's directory), `import ..x.y` (one directory up per extra dot),
+   `import @x.y` (the project root): the directory to look in, allocated, and the rest. */
+static char *relative_base(VM *vm, const char *name, const char *from, const char **rest) {
+    size_t dots = 0;
+    while (name[dots] == '.')
+        dots++;
+    char *base;
+    if (name[0] == '@') {
+        base = project_root(vm);
+        *rest = name + 1;
+    } else {
+        char *dir = dir_of(from ? from : "./main.fw");
+        base = canonical(dir);
+        free(dir);
+        *rest = name + dots;
+    }
+    for (size_t i = 1; i < dots; i++) {
+        char *up = dir_of(base);
+        free(base);
+        base = up;
+    }
+    return base;
+}
 static char *resolve_module_path(VM *vm, const char *name, const char *from) {
+    if ((name[0] == '.' || name[0] == '@') && !is_path_import(name)) {
+        const char *rest;
+        char *base = relative_base(vm, name, from, &rest);
+        char rel[1024];
+        snprintf(rel, sizeof rel, "%s", rest);
+        for (char *c = rel; *c; c++)
+            if (*c == '.')
+                *c = '/';
+        char *result = module_in(base, rel, true);
+        free(base);
+        return result;
+    }
     char *from_dir = dir_of(from ? from : ".");
     char *main_dir = dir_of(vm->main_path ? vm->main_path : ".");
     char *result = NULL;
+    if (!strncmp(name, "@/", 2)) {
+        /* "@/lib/util.fw" starts at the project root */
+        char *root = project_root(vm);
+        result = try_module_file(root, name + 2);
+        free(root);
+        free(from_dir);
+        free(main_dir);
+        return result;
+    }
     if (is_path_import(name)) {
         const char *dirs[] = {from_dir, main_dir};
         for (int i = 0; i < 2 && !result; i++) {
@@ -3672,9 +4037,12 @@ static char *resolve_module_path(VM *vm, const char *name, const char *from) {
     for (char *c = rel; *c; c++)
         if (*c == '.')
             *c = '/';
-    result = try_module_file(from_dir, rel);
+    /* A directory module (`import ui` loads ui/ui.fw, ui/main.fw, or ui/lib.fw), but never for
+       the names of native and library modules: a project's web/ folder does not hide `import web`. */
+    bool directories = !lib_is_native_module(name) && !lib_embedded_module(name);
+    result = module_in(from_dir, rel, directories);
     if (!result && strcmp(from_dir, main_dir) != 0)
-        result = try_module_file(main_dir, rel);
+        result = module_in(main_dir, rel, directories);
     /* nearest .flywheel-modules at or above the importing file */
     if (!result) {
         char *d = canonical(from_dir);
@@ -3826,11 +4194,30 @@ ObjModule *vm_load_module(VM *vm, const char *name, const char *from_path, bool 
         snprintf(err->message, sizeof err->message, "Flywheel Lite cannot import from URLs (%s); download the file and import it by path", name);
     else if (lib_is_native_module(name))
         snprintf(err->message, sizeof err->message, "module '%s' is not available in Flywheel Lite; use the Flywheel compiler for it", name);
-    else
-    {
-        char where[900];
+    else if ((name[0] == '.' || name[0] == '@') && !is_path_import(name)) {
+        const char *rest;
+        char *base = relative_base(vm, name, from_path, &rest);
+        char hint[400];
+        module_suggestion(base, name, hint, sizeof hint);
+        char rel[600];
+        snprintf(rel, sizeof rel, "%s", rest);
+        for (char *c = rel; *c; c++)
+            if (*c == '.')
+                *c = '/';
+        const char *stem = strrchr(rel, '/');
+        snprintf(err->message, sizeof err->message,
+                 "module '%.100s' not found (looked for %.300s/%.150s.fw, .fly, and a %.60s/ directory module)%.200s",
+                 name, base, rel, stem ? stem + 1 : rel, hint);
+        free(base);
+    } else {
+        char where[600];
         describe_search(from_path, where, sizeof where);
-        snprintf(err->message, sizeof err->message, "module '%.100s' not found (searched %.880s)", name, where);
+        char hint[300];
+        char *from_dir = dir_of(from_path ? from_path : "./main.fw");
+        module_suggestion(from_dir, name, hint, sizeof hint);
+        free(from_dir);
+        snprintf(err->message, sizeof err->message, "module '%.100s' not found (searched %.580s)%.300s", name, where,
+                 hint);
     }
     return NULL;
 }
