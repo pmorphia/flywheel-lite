@@ -533,7 +533,11 @@ static bool lex_text(Arena *arena, const char *src, size_t len, TokenList *out, 
                 if (s[L.p] == two[i][0] && s[L.p + 1] == two[i][1])
                     oplen = 2;
         }
-        if (oplen == 2 && s[L.p] == '.' && L.p + 2 < n && s[L.p + 2] == '<')
+        /* `a..<b` is a half-open range, but `a..<vector2 1 2>` is `..` before a vector: `..<` takes
+           integers, and a vector tag after it can only start markup. */
+        if (oplen == 2 && s[L.p] == '.' && L.p + 2 < n && s[L.p + 2] == '<' &&
+            !(L.p + 10 < n && lx_vector_tag(s + L.p + 3, 7) &&
+              (is_space(s[L.p + 10]) || s[L.p + 10] == '>' || s[L.p + 10] == '/')))
             oplen = 3;
         if (!strchr("+-*/%=!<>()[]{}.,?:@", c) || c == 0)
             lfail(&L, "invalid character");

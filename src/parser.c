@@ -2375,7 +2375,7 @@ static FuncDecl *parse_function(Parser *P, const char *owner, bool signature_onl
         take(P);
         Token *op = take(P);
         static const char *overloadable[] = {"+", "-", "*", "/", "//", "%", "==", "<", "<=", ">", ">=", "[",
-                                             ":", "**", NULL};
+                                             ":", "..", "**", NULL};
         if (!in_list(op, overloadable)) {
             char nm[32];
             snprintf(nm, sizeof nm, "%.*s", op->len > 20 ? 20 : op->len, op->text);

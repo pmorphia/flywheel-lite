@@ -1607,6 +1607,11 @@ static bool power_or_slice(VM *vm, uint8_t op, Value a, Value b, Value *out) {
     buf_init(&y);
     type_name_of(vm, a, &x);
     type_name_of(vm, b, &y);
+    if (x.data && (!strcmp(x.data, "vector2") || !strcmp(x.data, "vector3") || !strcmp(x.data, "vector4"))) {
+        buf_free(&x);
+        buf_free(&y);
+        return vm_throw(vm, "TypeError", "the cells between two vectors are a range, a..b, not a:b");
+    }
     bool r = vm_throw(vm, "TypeError",
                       "':' makes a slice of two integers, such as 1:5, or calls an operator : that a class or "
                       "struct declares; got %s and %s",
@@ -2152,7 +2157,23 @@ static bool slice_value(VM *vm, Value obj, Value lo, Value hi, bool inclusive, V
 
 /* ---------------------------------------------------------------- iteration helpers */
 
+/* `a..b` between instances calls the class's or struct's `operator ..` (the built-in vectors list
+   the cells between them); otherwise both endpoints are integers. */
 static bool make_range(VM *vm, Value lo, Value hi, bool inclusive, Value *out) {
+    if (IS_OBJT(lo, OBJ_INSTANCE)) {
+        bool found = false;
+        if (inclusive && !instance_op(vm, "..", lo, hi, 1, out, &found))
+            return false;
+        if (found)
+            return true;
+        ObjClass *k = AS_INSTANCE(lo)->klass;
+        const char *kind = k->is_struct ? "struct" : "class";
+        if (inclusive)
+            return vm_throw(vm, "TypeError", "%s %s does not define operator ..; declare `function operator ..(...)`",
+                            kind, k->name->chars);
+        return vm_throw(vm, "TypeError", "%s %s has no '..<' range; '..<' takes integers, and '..' calls operator ..",
+                        kind, k->name->chars);
+    }
     if (!IS_INT(lo) || !IS_INT(hi))
         return vm_throw(vm, "TypeError", "range endpoints must be integers");
     int64_t a = lo.as.i, b = hi.as.i;
@@ -3469,9 +3490,18 @@ static RunResult run(VM *vm, int base) {
     CASE(OP_RANGE_PREP) {
         uint8_t s = READ_BYTE();
         if (!IS_INT(frame->slots[s]) || !IS_INT(frame->slots[s + 1])) {
+            /* `for c in a..b` over instances: their operator .. gives the values, which the loop
+               walks by index ($cur) through the tuple, kept in $end. */
             SYNC();
-            vm_throw(vm, "TypeError", "range endpoints must be integers");
-            THROW();
+            Value range;
+            if (!make_range(vm, frame->slots[s], frame->slots[s + 1], ip[2] != 0, &range))
+                THROW();
+            if (!IS_LIST(range)) {
+                vm_throw(vm, "TypeError", "operator .. used by `for` must return a tuple or an array");
+                THROW();
+            }
+            frame->slots[s] = val_int(0);
+            frame->slots[s + 1] = range;
         }
         DISPATCH();
     }
@@ -3479,6 +3509,17 @@ static RunResult run(VM *vm, int base) {
         uint8_t s = READ_BYTE(), incl = READ_BYTE();
         uint16_t exit = READ_U16();
         Value *slots = frame->slots + s;
+        if (TB_UNLIKELY(!IS_INT(slots[1]))) {
+            ObjList *items = (ObjList *)AS_OBJ(slots[1]);
+            int64_t at = slots[0].as.i;
+            if (at >= items->count) {
+                ip += exit;
+                DISPATCH();
+            }
+            PUSH(items->items[at]);
+            slots[0].as.i = at + 1;
+            DISPATCH();
+        }
         int64_t cur = slots[0].as.i, end = slots[1].as.i;
         if (incl ? cur > end : cur >= end) {
             ip += exit;
