@@ -705,7 +705,28 @@ static Node *mk_element(MarkupCtx *m) {
     Node *e = node(P, N_ELEMENT, tag, mk_line(m), m->col);
     int ncap = 0;
     mk_space(m);
+    bool vector = lx_vector_tag(tag, strlen(tag));
     while (m->p < n && s[m->p] != '>' && s[m->p] != '/') {
+        /* A vector's components may be given in order: <vector3 1 2.5 {z}>. They are kept under
+           the name "" and assigned to x, y, z, w when the element becomes a call. */
+        if (vector && (s[m->p] == '{' || s[m->p] == '-' || s[m->p] == '+' || s[m->p] == '.' ||
+                       isdigit((unsigned char)s[m->p]))) {
+            Node *value;
+            if (s[m->p] == '{')
+                value = mk_embedded(m);
+            else {
+                size_t begin = m->p;
+                while (m->p < n && !isspace((unsigned char)s[m->p]) && s[m->p] != '>' &&
+                       !(s[m->p] == '/' && m->p + 1 < n && s[m->p + 1] == '>'))
+                    m->p++;
+                value = node(P, N_STRING, arena_strndup(P->arena, s + begin, m->p - begin), mk_line(m), m->col);
+            }
+            GROWV(P->arena, e->names, e->nnames, ncap, const char *);
+            e->names[e->nnames++] = "";
+            nl_push(P->arena, &e->args, value);
+            mk_space(m);
+            continue;
+        }
         const char *a = mk_name(m);
         for (int i = 0; i < e->nnames; i++)
             if (!strcmp(e->names[i], a))
@@ -866,29 +887,63 @@ static Node *parse_markup(Parser *P) {
     if (m.p != m.n)
         pfail_at(P, t->line, t->col, "unexpected text after markup%s", "");
     if (e->kind == N_ELEMENT && e->text && lx_vector_tag(e->text, strlen(e->text))) {
-        /* `<vector2 x=1 y={n}>` is the call vector2(x=1, y=n). Unquoted and quoted values are
-           whole numbers; `{expression}` passes any expression. */
+        /* `<vector2 x=1 y={n}>` is the call vector2(x=1, y=n), and `<vector3 1 2.5 {z}>` gives the
+           components in order. Unquoted and quoted values are numbers (1, -2, 0.5, 1e3);
+           `{expression}` passes any expression. */
         Node *call = tnode(P, N_CALL, "", t);
         nl_push(P->arena, &call->args, tnode(P, N_NAME, e->text, t));
-        int dimensions = e->text[6] - '0';
+        int dimensions = e->text[6] - '0', position = 0;
+        static const char *axes[] = {"x", "y", "z", "w"};
         for (int i = 0; i < e->nnames; i++) {
             const char *axis = e->names[i];
             Node *value = e->args.items[i];
+            if (!*axis) {
+                if (position >= dimensions)
+                    pfail_at(P, t->line, t->col, "<%s> takes at most %d components", e->text, dimensions);
+                axis = axes[position++];
+            }
             const char *found = strlen(axis) == 1 ? strchr("xyzw", axis[0]) : NULL;
             if (!found || found - "xyzw" >= dimensions)
                 pfail_at(P, t->line, t->col, "%s has the components %.*s, not '%s'", e->text, dimensions, "xyzw",
                          axis);
             if (value->kind == N_STRING) {
                 const char *text = value->text;
-                size_t digits = text[0] == '-' || text[0] == '+' ? 1 : 0, n = strlen(text);
-                bool ok = !value->valueless && digits < n;
-                for (size_t k = digits; k < n && ok; k++)
-                    ok = isdigit((unsigned char)text[k]);
-                if (!ok)
+                size_t digits = text[0] == '-' || text[0] == '+' ? 1 : 0, n = strlen(text), k = digits;
+                /* [+-]?(\d+(\.\d+)?|\.\d+)([eE][+-]?\d+)? */
+                size_t whole = 0, fraction = 0;
+                bool real = false, ok = !value->valueless;
+                while (k < n && isdigit((unsigned char)text[k]))
+                    k++, whole++;
+                if (k < n && text[k] == '.') {
+                    real = true;
+                    k++;
+                    while (k < n && isdigit((unsigned char)text[k]))
+                        k++, fraction++;
+                    ok = ok && fraction > 0;
+                }
+                ok = ok && (whole > 0 || fraction > 0);
+                if (ok && k < n && (text[k] == 'e' || text[k] == 'E')) {
+                    real = true;
+                    k++;
+                    if (k < n && (text[k] == '+' || text[k] == '-'))
+                        k++;
+                    size_t exponent = 0;
+                    while (k < n && isdigit((unsigned char)text[k]))
+                        k++, exponent++;
+                    ok = exponent > 0;
+                }
+                if (!ok || k != n)
                     pfail_at(P, t->line, t->col,
-                             "<%s> component '%s' must be a whole number or {expression}, such as %s=3", e->text,
-                             axis, axis);
-                Node *number = tnode(P, N_INT, text + digits, t);
+                             "<%s> component '%s' must be a number or {expression}, such as %s=3 or %s=1.5",
+                             e->text, axis, axis, axis);
+                const char *body = text + digits;
+                if (body[0] == '.') {
+                    char *padded = arena_alloc(P->arena, strlen(body) + 2);
+                    padded[0] = '0';
+                    strcpy(padded + 1, body);
+                    body = padded;
+                }
+                Node *number = tnode(P, real ? N_REAL : N_INT, body, t);
                 if (text[0] == '-') {
                     Node *negative = tnode(P, N_UNARY, "-", t);
                     nl_push(P->arena, &negative->args, number);

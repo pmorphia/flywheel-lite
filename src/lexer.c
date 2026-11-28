@@ -180,11 +180,17 @@ static bool markup_argument_start(const char *s, size_t n, size_t p) {
 #define SPACE()                                                                                   \
     while (p < n && is_space(s[p]))                                                               \
     ++p
+    size_t tag = p;
     NAME();
+    size_t tag_len = p - tag;
     SPACE();
     if (p == n)
         return false;
     if (s[p] == '>' || (s[p] == '/' && p + 1 < n && s[p + 1] == '>'))
+        return true;
+    /* A vector with its components in order: `<vector3 1 2 3>`, `<vector2 {x} -1>`. */
+    if (lx_vector_tag(s + tag, tag_len) &&
+        (s[p] == '{' || s[p] == '-' || s[p] == '+' || s[p] == '.' || isdigit((unsigned char)s[p])))
         return true;
     while (p < n && lx_start((unsigned char)s[p])) {
         size_t begin = p;
